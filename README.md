@@ -1,6 +1,3 @@
-cd ~/eth-signal-bot
-
-cat << 'EOF' > README.md
 # ⚡ Binance 6-Factor Confluence Signal Bot
 
 An automated, cloud-hosted cryptocurrency market scanner and real-time alerting engine. The system continuously ingests public data from Binance USDⓈ-M Futures (ETHUSDT 5-minute timeframe), evaluating multi-timeframe moving averages, taker order flow (CVD), and Open Interest buildup dynamics to dispatch high-probability signals directly to Telegram.
