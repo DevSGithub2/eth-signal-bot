@@ -12,8 +12,8 @@ import numpy as np
 SYMBOL = os.getenv("SYMBOL", "ETHUSDT")
 INTERVAL = os.getenv("INTERVAL", "5m")
 
-TELEGRAM_BOT_TOKEN = os.getenv("8758980368:AAEM-duL86rM3NdvO3tRPzAkfGBmcG9lU_M")
-TELEGRAM_CHANNEL_ID = os.getenv("-4379193701")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
 BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_OI_URL = "https://fapi.binance.com/futures/data/openInterestHist"
