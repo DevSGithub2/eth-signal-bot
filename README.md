@@ -52,7 +52,147 @@ eth-signal-bot/
 ├── requirements.txt    # Production dependencies (Flask, Gunicorn, Pandas, NumPy, Requests)
 └── README.md           # Technical documentation
 
+---eth-signal-bot/
+├── app.py              # Flask web server & background thread orchestrator
+├── scoring_bot.py      # Data fetching, 6-factor calculation & Telegram dispatcher
+├── requirements.txt    # Production dependencies (Flask, Gunicorn, Pandas, NumPy, Requests)
+└── README.md           # Technical documentation
+
+---eth-signal-bot/
+├── app.py              # Flask web server & background thread orchestrator
+├── scoring_bot.py      # Data fetching, 6-factor calculation & Telegram dispatcher
+├── requirements.txt    # Production dependencies (Flask, Gunicorn, Pandas, NumPy, Requests)
+└── README.md           # Technical documentation ```
+
 ---
+## 🚀 Local Installation & Setup
+
+### 1. Clone the Repository
+```bash
+
+git clone [https://github.com/DevSGithub2/eth-signal-bot.git](https://github.com/DevSGithub2/eth-signal-bot.git)
+cd eth-signal-bot
+
+### 2. Create and Activate Virtual Environment
+```bash
+
+python3 -m venv venv
+source venv/bin/activate
+
+###3. Install Dependencies
+```bash
+
+pip install -r requirements.txt
+
+### 4. Configure Environment Variables
+``bash
+
+export TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+export TELEGRAM_CHAT_ID="your_telegram_chat_id"
+
+### 5. Start the Application
+```bash
+python3 app.py
+
+## ☁️ Cloud Deployment (Render & UptimeRobot)
+
+1. **Create Web Service:** Connect your GitHub repository to [Render](https://render.com).
+2. **Build Settings:**
+   * **Runtime:** `Python 3`
+   * **Build Command:** `pip install -r requirements.txt`
+   * **Start Command:** `gunicorn app:app`
+   * **Instance Type:** `Free`
+3. **Environment Variables:** Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` under the **Environment** tab.
+4. **24/7 Keep-Alive:** Create a free HTTP monitor on [UptimeRobot](https://uptimerobot.com) pinging your Render URL every 5 minutes to prevent instance idling.
+
+## 📬 Sample Telegram Alert Format
+
+```text
+🟢 STRONG LONG WATCH (Score: 6/6)
+━━━━━━━━━━━━━━━━━━━━
+🪙 Pair: ETHUSDT | ⏱ Interval: 5m
+💵 Price: $1,881.00
+📈 20 EMA: $1,878.50 | 200 EMA: $1,865.20
+📊 Delta: +324.0 ETH (Buy Dominance)
+⚡ OI State: Long Buildup (Price ↑ + OI ↑)
+━━━━━━━━━━━━━━━━━━━━
+📋 Confluences (6/6 Met):
+✅ Price > 200 EMA (Macro Bullish)
+✅ 20 EMA > 200 EMA (Bullish Alignment)
+✅ Candle Close > 20 EMA (Momentum)
+✅ Volume > 20 SMA Volume
+✅ OI: Long Buildup (Price ↑ + OI ↑)
+✅ CVD Delta Positive (+324.0 ETH)
+━━━━━━━━━━━━━━━━━━━━
+⚠️ Human confirmation & level retest required.
+
+## ⚖️ Disclaimer
+
+This bot is designed for technical analysis, screening, and educational purposes only. It does not constitute financial or investment advice. Always perform independent chart analysis and manage risk accordingly.
+## 🚀 Local Installation & Setup
+
+### 1. Clone the Repository
+```bash
+
+git clone [https://github.com/DevSGithub2/eth-signal-bot.git](https://github.com/DevSGithub2/eth-signal-bot.git)
+cd eth-signal-bot
+
+### 2. Create and Activate Virtual Environment
+```bash
+
+python3 -m venv venv
+source venv/bin/activate
+
+###3. Install Dependencies
+```bash
+
+pip install -r requirements.txt
+
+### 4. Configure Environment Variables
+``bash
+
+export TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+export TELEGRAM_CHAT_ID="your_telegram_chat_id"
+
+### 5. Start the Application
+```bash
+python3 app.py
+
+## ☁️ Cloud Deployment (Render & UptimeRobot)
+
+1. **Create Web Service:** Connect your GitHub repository to [Render](https://render.com).
+2. **Build Settings:**
+   * **Runtime:** `Python 3`
+   * **Build Command:** `pip install -r requirements.txt`
+   * **Start Command:** `gunicorn app:app`
+   * **Instance Type:** `Free`
+3. **Environment Variables:** Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` under the **Environment** tab.
+4. **24/7 Keep-Alive:** Create a free HTTP monitor on [UptimeRobot](https://uptimerobot.com) pinging your Render URL every 5 minutes to prevent instance idling.
+
+## 📬 Sample Telegram Alert Format
+
+```text
+🟢 STRONG LONG WATCH (Score: 6/6)
+━━━━━━━━━━━━━━━━━━━━
+🪙 Pair: ETHUSDT | ⏱ Interval: 5m
+💵 Price: $1,881.00
+📈 20 EMA: $1,878.50 | 200 EMA: $1,865.20
+📊 Delta: +324.0 ETH (Buy Dominance)
+⚡ OI State: Long Buildup (Price ↑ + OI ↑)
+━━━━━━━━━━━━━━━━━━━━
+📋 Confluences (6/6 Met):
+✅ Price > 200 EMA (Macro Bullish)
+✅ 20 EMA > 200 EMA (Bullish Alignment)
+✅ Candle Close > 20 EMA (Momentum)
+✅ Volume > 20 SMA Volume
+✅ OI: Long Buildup (Price ↑ + OI ↑)
+✅ CVD Delta Positive (+324.0 ETH)
+━━━━━━━━━━━━━━━━━━━━
+⚠️ Human confirmation & level retest required.
+
+## ⚖️ Disclaimer
+
+This bot is designed for technical analysis, screening, and educational purposes only. It does not constitute financial or investment advice. Always perform independent chart analysis and manage risk accordingly.
 ## 🚀 Local Installation & Setup
 
 ### 1. Clone the Repository
