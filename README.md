@@ -45,7 +45,7 @@ The engine monitors closed 5-minute candles (`df.iloc[-2]`) and scores the marke
 
 ## 📂 Repository Structure
 
-```text
+text
 eth-signal-bot/
 ├── app.py              # Flask web server & background thread orchestrator
 ├── scoring_bot.py      # Data fetching, 6-factor calculation & Telegram dispatcher
@@ -68,30 +68,31 @@ eth-signal-bot/
 ## 🚀 Local Installation & Setup
 
 ### 1. Clone the Repository
-```bash
+
+bash
 
 git clone [https://github.com/DevSGithub2/eth-signal-bot.git](https://github.com/DevSGithub2/eth-signal-bot.git)
 cd eth-signal-bot
 
 ### 2. Create and Activate Virtual Environment
-```bash
+bash
 
 python3 -m venv venv
 source venv/bin/activate
 
 ###3. Install Dependencies
-```bash
+bash
 
 pip install -r requirements.txt
 
 ### 4. Configure Environment Variables
-``bash
+bash
 
 export TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 export TELEGRAM_CHAT_ID="your_telegram_chat_id"
 
 ### 5. Start the Application
-```bash
+bash
 python3 app.py
 
 ## ☁️ Cloud Deployment (Render & UptimeRobot)
@@ -107,7 +108,7 @@ python3 app.py
 
 ## 📬 Sample Telegram Alert Format
 
-```text
+text
 🟢 STRONG LONG WATCH (Score: 6/6)
 ━━━━━━━━━━━━━━━━━━━━
 🪙 Pair: ETHUSDT | ⏱ Interval: 5m
@@ -171,7 +172,7 @@ python3 app.py
 
 ## 📬 Sample Telegram Alert Format
 
-```text
+    text
 🟢 STRONG LONG WATCH (Score: 6/6)
 ━━━━━━━━━━━━━━━━━━━━
 🪙 Pair: ETHUSDT | ⏱ Interval: 5m
