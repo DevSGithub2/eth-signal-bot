@@ -52,7 +52,7 @@ eth-signal-bot/
 ├── requirements.txt    # Production dependencies (Flask, Gunicorn, Pandas, NumPy, Requests)
 └── README.md           # Technical documentation
 
-
+---
 ## 🚀 Local Installation & Setup
 
 ### 1. Clone the Repository
