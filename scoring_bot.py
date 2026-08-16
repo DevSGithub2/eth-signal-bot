@@ -1,233 +1,201 @@
-import time
 import requests
 import pandas as pd
 import numpy as np
+import time
+import os
 
-# --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = "8758980368:AAEM-duL86rM3NdvO3tRPzAkfGBmcG9lU_M"
-TELEGRAM_CHANNEL_ID = "-1004379193701"
+TELEGRAM_CHAT_ID = "-4379193701"
+
 SYMBOL = "ETHUSDT"
 INTERVAL = "5m"
-
-BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
-BINANCE_OI_URL = "https://fapi.binance.com/futures/data/openInterestHist"
+LIMIT = 250
 
 def send_telegram_alert(message: str):
-    """Sends scored signal to your Telegram Channel."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
+        "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML"
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        # If standard group ID fails, try supergroup prefix
+        if r.status_code != 200 and not str(TELEGRAM_CHAT_ID).startswith("-100"):
+            alt_chat_id = f"-100{abs(int(TELEGRAM_CHAT_ID))}"
+            payload["chat_id"] = alt_chat_id
+            requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Error sending Telegram alert: {e}")
 
-def fetch_klines(symbol=SYMBOL, interval=INTERVAL, limit=250):
-    """Fetches public historical candles and taker volumes from Binance Futures."""
+def fetch_klines(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT):
+    url = "https://fapi.binance.com/fapi/v1/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    response = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
-    data = response.json()
+    try:
+        r = requests.get(url, params=params, timeout=10).json()
+        if not isinstance(r, list) or len(r) < 205:
+            return None
+        
+        df = pd.DataFrame(r, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades", "taker_buy_base",
+            "taker_buy_quote", "ignore"
+        ])
+        numeric_cols = ["open", "high", "low", "close", "volume", "taker_buy_base"]
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+        return df
+    except Exception:
+        return None
 
-    df = pd.DataFrame(data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore"
-    ])
-
-    for col in ["open", "high", "low", "close", "volume", "taker_buy_base"]:
-        df[col] = df[col].astype(float)
-
-    return df
-
-def fetch_open_interest(symbol=SYMBOL, period="5m", limit=30):
-    """Fetches Open Interest history from Binance Futures."""
+def fetch_open_interest_hist(symbol=SYMBOL, period=INTERVAL, limit=30):
+    url = "https://fapi.binance.com/futures/data/openInterestHist"
     params = {"symbol": symbol, "period": period, "limit": limit}
     try:
-        response = requests.get(BINANCE_OI_URL, params=params, timeout=10)
-        data = response.json()
-        df_oi = pd.DataFrame(data)
-        df_oi["sumOpenInterest"] = df_oi["sumOpenInterest"].astype(float)
-        df_oi["sumOpenInterestValue"] = df_oi["sumOpenInterestValue"].astype(float)
-        return df_oi
-    except Exception as e:
-        print(f"Error fetching OI: {e}")
-        return pd.DataFrame()
+        r = requests.get(url, params=params, timeout=10).json()
+        if isinstance(r, list) and len(r) >= 2:
+            return float(r[-1]["sumOpenInterest"]), float(r[-2]["sumOpenInterest"])
+    except Exception:
+        pass
+    return None, None
 
-def calculate_indicators(df):
-    """Computes EMAs, Volume SMA, and CVD (Cumulative Volume Delta)."""
-    df["ema_20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
-    df["vol_sma_20"] = df["volume"].rolling(window=20).mean()
+def evaluate_market():
+    df = fetch_klines()
+    if df is None or len(df) < 205:
+        return None
 
-    # CVD & Delta Calculation
-    df["taker_sell_base"] = df["volume"] - df["taker_buy_base"]
-    df["delta"] = df["taker_buy_base"] - df["taker_sell_base"]
-    df["cvd"] = df["delta"].cumsum()
-    return df
+    # Technical Indicators
+    df["20_EMA"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["200_EMA"] = df["close"].ewm(span=200, adjust=False).mean()
+    df["vol_sma"] = df["volume"].rolling(window=20).mean()
 
-def evaluate_scoring(df, df_oi):
-    """
-    Evaluates 6-Factor Model:
-    1. Macro Trend: Price vs EMA 200
-    2. Trend Alignment: EMA 20 vs EMA 200
-    3. Momentum: Close vs EMA 20
-    4. Volume Surge: Volume vs Volume SMA 20
-    5. Open Interest: Buildup / Unwinding
-    6. Volume Delta (CVD): Aggressive Buyer / Seller Pressure
-    """
-    latest = df.iloc[-2]
-    prev = df.iloc[-3]
+    # CVD Taker Delta
+    df["delta"] = (2 * df["taker_buy_base"]) - df["volume"]
+    
+    # Safe Candle Access (-2 = last closed candle)
+    closed_candle = df.iloc[-2]
+    prev_closed = df.iloc[-3]
 
-    close = latest["close"]
-    prev_close = prev["close"]
-    ema_20 = latest["ema_20"]
-    ema_200 = latest["ema_200"]
-    vol = latest["volume"]
-    vol_avg = latest["vol_sma_20"]
-    delta = latest["delta"]
+    price = float(closed_candle["close"])
+    ema20 = float(closed_candle["20_EMA"])
+    ema200 = float(closed_candle["200_EMA"])
+    vol = float(closed_candle["volume"])
+    vol_sma = float(closed_candle["vol_sma"])
+    delta = float(closed_candle["delta"])
 
-    long_score = 0
-    short_score = 0
-    long_reasons = []
-    short_reasons = []
+    curr_oi, prev_oi = fetch_open_interest_hist()
+    if curr_oi is None:
+        curr_oi, prev_oi = 0, 0
 
-    # 1. Macro Trend (EMA 200)
-    if close > ema_200:
-        long_score += 1
-        long_reasons.append("✅ Price > 200 EMA (Macro Bullish)")
-    else:
-        short_score += 1
-        short_reasons.append("✅ Price < 200 EMA (Macro Bearish)")
+    # 1. Macro Trend
+    bullish_trend = price > ema200
+    bearish_trend = price < ema200
 
-    # 2. Trend Alignment (EMA 20 vs EMA 200)
-    if ema_20 > ema_200:
-        long_score += 1
-        long_reasons.append("✅ 20 EMA > 200 EMA (Bullish Alignment)")
-    else:
-        short_score += 1
-        short_reasons.append("✅ 20 EMA < 200 EMA (Bearish Alignment)")
+    # 2. EMA Alignment
+    bullish_align = ema20 > ema200
+    bearish_align = ema20 < ema200
 
-    # 3. Momentum (Close vs EMA 20)
-    if close > ema_20:
-        long_score += 1
-        long_reasons.append("✅ Candle Close > 20 EMA (Momentum)")
-    else:
-        short_score += 1
-        short_reasons.append("✅ Candle Close < 20 EMA (Momentum)")
+    # 3. Momentum
+    bullish_mom = price > ema20
+    bearish_mom = price < ema20
 
     # 4. Volume Surge
-    if vol > vol_avg:
-        long_score += 1
-        short_score += 1
-        long_reasons.append("✅ Volume > 20 SMA Volume")
-        short_reasons.append("✅ Volume > 20 SMA Volume")
+    volume_surge = vol > vol_sma
 
-    # 5. Open Interest (OI)
-    oi_status = "Neutral"
-    if not df_oi.empty and len(df_oi) >= 2:
-        latest_oi = df_oi.iloc[-1]["sumOpenInterest"]
-        prev_oi = df_oi.iloc[-2]["sumOpenInterest"]
+    # 5. Open Interest State
+    price_up = price > float(prev_closed["close"])
+    oi_up = curr_oi > prev_oi if prev_oi else True
 
-        price_up = close > prev_close
-        oi_up = latest_oi > prev_oi
+    long_buildup = price_up and oi_up
+    short_buildup = (not price_up) and oi_up
 
-        if price_up and oi_up:
-            oi_status = "Long Buildup (Price ↑ + OI ↑)"
-            long_score += 1
-            long_reasons.append(f"✅ OI: {oi_status}")
-        elif not price_up and oi_up:
-            oi_status = "Short Buildup (Price ↓ + OI ↑)"
-            short_score += 1
-            short_reasons.append(f"✅ OI: {oi_status}")
-        elif price_up and not oi_up:
-            oi_status = "Short Covering (Price ↑ + OI ↓)"
-        else:
-            oi_status = "Long Unwinding (Price ↓ + OI ↓)"
+    # 6. CVD Delta Dominance
+    cvd_bullish = delta > 0
+    cvd_bearish = delta < 0
 
-    # 6. Cumulative Volume Delta (CVD)
-    if delta > 0:
-        long_score += 1
-        long_reasons.append(f"✅ CVD Delta Positive (+{delta:,.1f} ETH Market Buy Dominance)")
-    else:
-        short_score += 1
-        short_reasons.append(f"✅ CVD Delta Negative ({delta:,.1f} ETH Market Sell Dominance)")
+    long_score = sum([bullish_trend, bullish_align, bullish_mom, volume_surge, long_buildup, cvd_bullish])
+    short_score = sum([bearish_trend, bearish_align, bearish_mom, volume_surge, short_buildup, cvd_bearish])
 
     return {
-        "close": close,
-        "ema_20": ema_20,
-        "ema_200": ema_200,
+        "price": price,
+        "ema20": ema20,
+        "ema200": ema200,
         "delta": delta,
         "long_score": long_score,
         "short_score": short_score,
-        "long_reasons": long_reasons,
-        "short_reasons": short_reasons,
-        "oi_status": oi_status
+        "long_buildup": long_buildup,
+        "short_buildup": short_buildup,
+        "vol_surge": volume_surge,
+        "bullish_trend": bullish_trend,
+        "bearish_trend": bearish_trend,
+        "bullish_align": bullish_align,
+        "bearish_align": bearish_align,
+        "bullish_mom": bullish_mom,
+        "bearish_mom": bearish_mom,
+        "cvd_bullish": cvd_bullish,
+        "cvd_bearish": cvd_bearish,
+        "candle_time": closed_candle["close_time"]
     }
 
-def run_engine():
-    print(f"🚀 6-Factor Engine (EMA + Vol + OI + CVD) live for {SYMBOL} ({INTERVAL})...")
-    last_processed_time = None
+def format_signal_message(sig, side):
+    score = sig["long_score"] if side == "LONG" else sig["short_score"]
+    emoji = "🟢" if side == "LONG" else "🔴"
+    
+    confluences = []
+    if side == "LONG":
+        if sig["bullish_trend"]: confluences.append("✅ Price > 200 EMA (Macro Bullish)")
+        if sig["bullish_align"]: confluences.append("✅ 20 EMA > 200 EMA (Bullish Alignment)")
+        if sig["bullish_mom"]: confluences.append("✅ Candle Close > 20 EMA (Momentum)")
+        if sig["vol_surge"]: confluences.append("✅ Volume > 20 SMA Volume")
+        if sig["long_buildup"]: confluences.append("✅ OI: Long Buildup (Price ↑ + OI ↑)")
+        if sig["cvd_bullish"]: confluences.append(f"✅ CVD Delta Positive (+{sig['delta']:.1f} ETH)")
+        state_str = "Long Buildup (Price ↑ + OI ↑)"
+    else:
+        if sig["bearish_trend"]: confluences.append("✅ Price < 200 EMA (Macro Bearish)")
+        if sig["bearish_align"]: confluences.append("✅ 20 EMA < 200 EMA (Bearish Alignment)")
+        if sig["bearish_mom"]: confluences.append("✅ Candle Close < 20 EMA (Momentum)")
+        if sig["vol_surge"]: confluences.append("✅ Volume > 20 SMA Volume")
+        if sig["short_buildup"]: confluences.append("✅ OI: Short Buildup (Price ↓ + OI ↑)")
+        if sig["cvd_bearish"]: confluences.append(f"✅ CVD Delta Negative ({sig['delta']:.1f} ETH)")
+        state_str = "Short Buildup (Price ↓ + OI ↑)"
 
+    confluence_text = "\n".join(confluences)
+
+    return f"""{emoji} <b>STRONG {side} WATCH (Score: {score}/6)</b>
+━━━━━━━━━━━━━━━━━━━━
+🪙 <b>Pair:</b> ETHUSDT | ⏱ <b>Interval:</b> 5m
+💵 <b>Price:</b> ${sig['price']:,.2f}
+📈 <b>20 EMA:</b> ${sig['ema20']:,.2f} | <b>200 EMA:</b> ${sig['ema200']:,.2f}
+📊 <b>Delta:</b> {sig['delta']:+,.1f} ETH
+⚡ <b>OI State:</b> {state_str}
+━━━━━━━━━━━━━━━━━━━━
+📋 <b>Confluences:</b>
+{confluence_text}
+━━━━━━━━━━━━━━━━━━━━
+⚠️ <i>Human confirmation & level retest required.</i>"""
+
+def run_engine():
+    print("🚀 6-Factor Engine (EMA + Vol + OI + CVD) live for ETHUSDT (5m)...")
+    last_processed_candle = None
+    
     while True:
         try:
-            df = fetch_klines()
-            latest_closed_time = df.iloc[-2]["open_time"]
+            sig = evaluate_market()
+            if sig and sig["candle_time"] != last_processed_candle:
+                last_processed_candle = sig["candle_time"]
+                
+                print(f"[5m Check] Price: ${sig['price']:.2f} | Long Score: {sig['long_score']}/6 | Short Score: {sig['short_score']}/6")
 
-            if latest_closed_time != last_processed_time:
-                last_processed_time = latest_closed_time
-                df = calculate_indicators(df)
-                df_oi = fetch_open_interest()
-                signal = evaluate_scoring(df, df_oi)
-
-                print(
-                    f"[{SYMBOL} 5M] Close: ${signal['close']:,.2f} | "
-                    f"Long Score: {signal['long_score']}/6 | Short Score: {signal['short_score']}/6 | "
-                    f"Delta: {signal['delta']:+,.1f} ETH | OI: {signal['oi_status']}"
-                )
-
-                # Send Alert when confluence score is 5/6 or 6/6
-                if signal["long_score"] >= 5:
-                    tag = "🟢 STRONG LONG WATCH" if signal["long_score"] == 6 else "🟡 LONG WATCH"
-                    msg = (
-                        f"{tag} *(Score: {signal['long_score']}/6)*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{SYMBOL}` | ⏱ *Interval:* `{INTERVAL}`\n"
-                        f"💵 *Price:* `${signal['close']:,.2f}`\n"
-                        f"📈 *20 EMA:* `${signal['ema_20']:,.2f}` | *200 EMA:* `${signal['ema_200']:,.2f}`\n"
-                        f"📊 *Delta:* `{signal['delta']:+,.1f} ETH`\n"
-                        f"⚡ *OI State:* `{signal['oi_status']}`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📋 *Confluences:*\n" + "\n".join(signal["long_reasons"]) + "\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"⚠️ *Human chart verification required.*"
-                    )
+                if sig["long_score"] >= 5:
+                    msg = format_signal_message(sig, "LONG")
                     send_telegram_alert(msg)
-
-                elif signal["short_score"] >= 5:
-                    tag = "🔴 STRONG SHORT WATCH" if signal["short_score"] == 6 else "🟠 SHORT WATCH"
-                    msg = (
-                        f"{tag} *(Score: {signal['short_score']}/6)*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{SYMBOL}` | ⏱ *Interval:* `{INTERVAL}`\n"
-                        f"💵 *Price:* `${signal['close']:,.2f}`\n"
-                        f"📈 *20 EMA:* `${signal['ema_20']:,.2f}` | *200 EMA:* `${signal['ema_200']:,.2f}`\n"
-                        f"📊 *Delta:* `{signal['delta']:+,.1f} ETH`\n"
-                        f"⚡ *OI State:* `{signal['oi_status']}`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📋 *Confluences:*\n" + "\n".join(signal["short_reasons"]) + "\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"⚠️ *Human chart verification required.*"
-                    )
+                elif sig["short_score"] >= 5:
+                    msg = format_signal_message(sig, "SHORT")
                     send_telegram_alert(msg)
-
-            time.sleep(10)
 
         except Exception as e:
             print(f"Engine Loop Error: {e}")
-            time.sleep(5)
+
+        time.sleep(10)
 
 if __name__ == "__main__":
     run_engine()
