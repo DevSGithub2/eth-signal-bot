@@ -57,49 +57,45 @@ eth-signal-bot/
 
 ### 1. Clone the Repository
 ```bash
+
 git clone [https://github.com/DevSGithub2/eth-signal-bot.git](https://github.com/DevSGithub2/eth-signal-bot.git)
 cd eth-signal-bot
 
-
 ### 2. Create and Activate Virtual Environment
-  ```Bash
-  python3 -m venv venv
-  source venv/bin/activate
+```bash
+
+python3 -m venv venv
+source venv/bin/activate
 
 ###3. Install Dependencies
-   Bash
+```bash
+
 pip install -r requirements.txt
 
-###4. Configure Environment Variables
-````Bash
+### 4. Configure Environment Variables
+``bash
+
 export TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 export TELEGRAM_CHAT_ID="your_telegram_chat_id"
 
-
-###5. Start the Application
-````Bash
+### 5. Start the Application
+```bash
 python3 app.py
 
+## ☁️ Cloud Deployment (Render & UptimeRobot)
 
-☁️ Cloud Deployment (Render & UptimeRobot)
-Create Web Service: Connect your GitHub repository to Render.
+1. **Create Web Service:** Connect your GitHub repository to [Render](https://render.com).
+2. **Build Settings:**
+   * **Runtime:** `Python 3`
+   * **Build Command:** `pip install -r requirements.txt`
+   * **Start Command:** `gunicorn app:app`
+   * **Instance Type:** `Free`
+3. **Environment Variables:** Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` under the **Environment** tab.
+4. **24/7 Keep-Alive:** Create a free HTTP monitor on [UptimeRobot](https://uptimerobot.com) pinging your Render URL every 5 minutes to prevent instance idling.
 
-Build Settings:
+## 📬 Sample Telegram Alert Format
 
-Runtime: Python 3
-
-Build Command: pip install -r requirements.txt
-
-Start Command: gunicorn app:app
-
-Instance Type: Free
-
-Environment Variables: Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID under the Environment tab.
-
-24/7 Keep-Alive: Create a free HTTP monitor on UptimeRobot pinging your Render URL every 5 minutes to prevent instance idling.
-
-📬 Sample Telegram Alert Format
-Plaintext
+```text
 🟢 STRONG LONG WATCH (Score: 6/6)
 ━━━━━━━━━━━━━━━━━━━━
 🪙 Pair: ETHUSDT | ⏱ Interval: 5m
@@ -117,5 +113,7 @@ Plaintext
 ✅ CVD Delta Positive (+324.0 ETH)
 ━━━━━━━━━━━━━━━━━━━━
 ⚠️ Human confirmation & level retest required.
-⚖️ Disclaimer
+
+## ⚖️ Disclaimer
+
 This bot is designed for technical analysis, screening, and educational purposes only. It does not constitute financial or investment advice. Always perform independent chart analysis and manage risk accordingly.
