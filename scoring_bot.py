@@ -35,7 +35,7 @@ def send_telegram_alert(message: str):
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         print("Telegram credentials are missing.")
-        return False
+        return False, None, None
 
     url = (
         f"https://api.telegram.org/bot"
@@ -49,7 +49,10 @@ def send_telegram_alert(message: str):
         "disable_web_page_preview": True,
     }
 
+    telegram_start = pd.Timestamp.now(tz="UTC")
+
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -60,15 +63,35 @@ def send_telegram_alert(message: str):
 
         result = response.json()
 
-        if not result.get("ok", False):
-            print(f"Telegram API error: {result}")
-            return False
+        telegram_sent = pd.Timestamp.now(tz="UTC")
 
-        return True
+        telegram_duration = (
+            telegram_sent - telegram_start
+        ).total_seconds()
+
+        if not result.get("ok", False):
+
+            print(
+                f"Telegram API error: {result}"
+            )
+
+            return False, telegram_sent, telegram_duration
+
+        return True, telegram_sent, telegram_duration
 
     except requests.RequestException as e:
-        print(f"Telegram request error: {e}")
-        return False
+
+        telegram_sent = pd.Timestamp.now(tz="UTC")
+
+        telegram_duration = (
+            telegram_sent - telegram_start
+        ).total_seconds()
+
+        print(
+            f"Telegram request error: {e}"
+        )
+
+        return False, telegram_sent, telegram_duration
 
 
 # ============================================================
@@ -98,7 +121,10 @@ def fetch_klines(
     data = response.json()
 
     if not isinstance(data, list) or len(data) < 220:
-        raise ValueError("Insufficient kline data received.")
+
+        raise ValueError(
+            "Insufficient kline data received."
+        )
 
     df = pd.DataFrame(
         data,
@@ -130,6 +156,7 @@ def fetch_klines(
     ]
 
     for col in numeric_columns:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
@@ -179,7 +206,11 @@ def fetch_open_interest(
         data = response.json()
 
         if not isinstance(data, list) or len(data) < 3:
-            print("Insufficient OI data.")
+
+            print(
+                "Insufficient OI data."
+            )
+
             return pd.DataFrame()
 
         df_oi = pd.DataFrame(data)
@@ -191,8 +222,13 @@ def fetch_open_interest(
         ]
 
         for col in required_columns:
+
             if col not in df_oi.columns:
-                print(f"Missing OI column: {col}")
+
+                print(
+                    f"Missing OI column: {col}"
+                )
+
                 return pd.DataFrame()
 
         df_oi["timestamp"] = pd.to_datetime(
@@ -227,7 +263,9 @@ def fetch_open_interest(
 
     except Exception as e:
 
-        print(f"OI fetch error: {e}")
+        print(
+            f"OI fetch error: {e}"
+        )
 
         return pd.DataFrame()
 
@@ -285,14 +323,19 @@ def calculate_indicators(df):
         df["taker_sell_base"]
     )
 
-    # Delta percentage of total volume
+    # Delta percentage
     df["delta_pct"] = (
         df["delta"] /
-        df["volume"].replace(0, np.nan)
+        df["volume"].replace(
+            0,
+            np.nan
+        )
     ) * 100
 
     # Cumulative Volume Delta
-    df["cvd"] = df["delta"].cumsum()
+    df["cvd"] = (
+        df["delta"].cumsum()
+    )
 
     return df
 
@@ -311,19 +354,27 @@ def get_aligned_oi(
 
     oi = df_oi.copy()
 
-    oi = oi.sort_values("timestamp")
+    oi = oi.sort_values(
+        "timestamp"
+    )
 
     target = pd.DataFrame({
-        "candle_time": [candle_time]
+        "candle_time": [
+            candle_time
+        ]
     })
 
     aligned = pd.merge_asof(
-        target.sort_values("candle_time"),
+        target.sort_values(
+            "candle_time"
+        ),
         oi,
         left_on="candle_time",
         right_on="timestamp",
         direction="nearest",
-        tolerance=pd.Timedelta(minutes=2)
+        tolerance=pd.Timedelta(
+            minutes=2
+        )
     )
 
     if aligned.empty:
@@ -331,7 +382,9 @@ def get_aligned_oi(
 
     row = aligned.iloc[0]
 
-    if pd.isna(row["timestamp"]):
+    if pd.isna(
+        row["timestamp"]
+    ):
         return None
 
     return row
@@ -365,13 +418,16 @@ def calculate_oi_state(
     if current is None:
         return result
 
-    current_time = current["timestamp"]
+    current_time = current[
+        "timestamp"
+    ]
 
     current_oi = float(
-        current["sumOpenInterest"]
+        current[
+            "sumOpenInterest"
+        ]
     )
 
-    # Previous OI observation
     previous_rows = df_oi[
         df_oi["timestamp"] < current_time
     ]
@@ -382,46 +438,83 @@ def calculate_oi_state(
     previous = previous_rows.iloc[-1]
 
     previous_oi = float(
-        previous["sumOpenInterest"]
+        previous[
+            "sumOpenInterest"
+        ]
     )
 
     if previous_oi == 0:
         return result
 
     oi_change_pct = (
-        (current_oi - previous_oi)
-        / previous_oi
+        (
+            current_oi -
+            previous_oi
+        )
+        /
+        previous_oi
     ) * 100
 
     price_change_pct = (
-        (close - previous_close)
-        / previous_close
+        (
+            close -
+            previous_close
+        )
+        /
+        previous_close
     ) * 100
 
     result["change_pct"] = oi_change_pct
+
     result["oi_time"] = current_time
 
     # Price + OI matrix
 
-    if price_change_pct > 0 and oi_change_pct > 0:
+    if (
+        price_change_pct > 0
+        and
+        oi_change_pct > 0
+    ):
 
-        result["status"] = "Long Buildup"
+        result["status"] = (
+            "Long Buildup"
+        )
 
-    elif price_change_pct < 0 and oi_change_pct > 0:
+    elif (
+        price_change_pct < 0
+        and
+        oi_change_pct > 0
+    ):
 
-        result["status"] = "Short Buildup"
+        result["status"] = (
+            "Short Buildup"
+        )
 
-    elif price_change_pct > 0 and oi_change_pct < 0:
+    elif (
+        price_change_pct > 0
+        and
+        oi_change_pct < 0
+    ):
 
-        result["status"] = "Short Covering"
+        result["status"] = (
+            "Short Covering"
+        )
 
-    elif price_change_pct < 0 and oi_change_pct < 0:
+    elif (
+        price_change_pct < 0
+        and
+        oi_change_pct < 0
+    ):
 
-        result["status"] = "Long Unwinding"
+        result["status"] = (
+            "Long Unwinding"
+        )
 
     else:
 
-        result["status"] = "Neutral"
+        result["status"] = (
+            "Neutral"
+        )
 
     return result
 
@@ -441,20 +534,51 @@ def evaluate_scoring(
     # Previous CLOSED candle
     previous = df.iloc[-3]
 
-    candle_time = latest["open_time"]
+    # IMPORTANT:
+    # Keep both opening and closing time.
+    candle_open_time = (
+        latest["open_time"]
+    )
 
-    close = float(latest["close"])
-    previous_close = float(previous["close"])
+    candle_close_time = (
+        latest["close_time"]
+    )
 
-    ema_20 = float(latest["ema_20"])
-    ema_200 = float(latest["ema_200"])
+    close = float(
+        latest["close"]
+    )
 
-    volume = float(latest["volume"])
-    volume_avg = float(latest["vol_sma_20"])
-    volume_ratio = float(latest["volume_ratio"])
+    previous_close = float(
+        previous["close"]
+    )
 
-    delta = float(latest["delta"])
-    delta_pct = float(latest["delta_pct"])
+    ema_20 = float(
+        latest["ema_20"]
+    )
+
+    ema_200 = float(
+        latest["ema_200"]
+    )
+
+    volume = float(
+        latest["volume"]
+    )
+
+    volume_avg = float(
+        latest["vol_sma_20"]
+    )
+
+    volume_ratio = float(
+        latest["volume_ratio"]
+    )
+
+    delta = float(
+        latest["delta"]
+    )
+
+    delta_pct = float(
+        latest["delta_pct"]
+    )
 
     long_score = 0
     short_score = 0
@@ -527,8 +651,11 @@ def evaluate_scoring(
     # ========================================================
 
     volume_confirmed = (
-        not np.isnan(volume_ratio)
-        and volume_ratio > 1.0
+        not np.isnan(
+            volume_ratio
+        )
+        and
+        volume_ratio > 1.0
     )
 
     if volume_confirmed:
@@ -538,8 +665,13 @@ def evaluate_scoring(
             f"20-period average"
         )
 
-        long_reasons.append(volume_text)
-        short_reasons.append(volume_text)
+        long_reasons.append(
+            volume_text
+        )
+
+        short_reasons.append(
+            volume_text
+        )
 
     # ========================================================
     # FACTOR 5 — OI
@@ -548,12 +680,17 @@ def evaluate_scoring(
     oi = calculate_oi_state(
         close=close,
         previous_close=previous_close,
-        candle_time=candle_time,
+        candle_time=candle_open_time,
         df_oi=df_oi
     )
 
-    oi_status = oi["status"]
-    oi_change_pct = oi["change_pct"]
+    oi_status = oi[
+        "status"
+    ]
+
+    oi_change_pct = oi[
+        "change_pct"
+    ]
 
     if oi_status == "Long Buildup":
 
@@ -633,10 +770,6 @@ def evaluate_scoring(
 
     # ========================================================
     # VOLUME CONFIRMATION
-    #
-    # Volume is not independently directional.
-    # It confirms whichever side already has stronger
-    # directional confluence.
     # ========================================================
 
     if volume_confirmed:
@@ -659,35 +792,53 @@ def evaluate_scoring(
 
     return {
 
-        "candle_time": candle_time,
+        "candle_open_time":
+            candle_open_time,
 
-        "close": close,
+        "candle_close_time":
+            candle_close_time,
 
-        "ema_20": ema_20,
+        "close":
+            close,
 
-        "ema_200": ema_200,
+        "ema_20":
+            ema_20,
 
-        "volume": volume,
+        "ema_200":
+            ema_200,
 
-        "volume_avg": volume_avg,
+        "volume":
+            volume,
 
-        "volume_ratio": volume_ratio,
+        "volume_avg":
+            volume_avg,
 
-        "delta": delta,
+        "volume_ratio":
+            volume_ratio,
 
-        "delta_pct": delta_pct,
+        "delta":
+            delta,
 
-        "oi_status": oi_status,
+        "delta_pct":
+            delta_pct,
 
-        "oi_change_pct": oi_change_pct,
+        "oi_status":
+            oi_status,
 
-        "long_score": long_score,
+        "oi_change_pct":
+            oi_change_pct,
 
-        "short_score": short_score,
+        "long_score":
+            long_score,
 
-        "long_reasons": long_reasons,
+        "short_score":
+            short_score,
 
-        "short_reasons": short_reasons
+        "long_reasons":
+            long_reasons,
+
+        "short_reasons":
+            short_reasons
     }
 
 
@@ -697,32 +848,57 @@ def evaluate_scoring(
 
 def build_message(
     signal,
-    direction
+    direction,
+    signal_generated_at
 ):
 
     if direction == "LONG":
 
-        score = signal["long_score"]
+        score = signal[
+            "long_score"
+        ]
 
-        reasons = signal["long_reasons"]
+        reasons = signal[
+            "long_reasons"
+        ]
 
         if score == 6:
-            tag = "🟢 STRONG LONG WATCH"
+
+            tag = (
+                "🟢 STRONG LONG WATCH"
+            )
+
         else:
-            tag = "🟡 LONG WATCH"
+
+            tag = (
+                "🟡 LONG WATCH"
+            )
 
     else:
 
-        score = signal["short_score"]
+        score = signal[
+            "short_score"
+        ]
 
-        reasons = signal["short_reasons"]
+        reasons = signal[
+            "short_reasons"
+        ]
 
         if score == 6:
-            tag = "🔴 STRONG SHORT WATCH"
-        else:
-            tag = "🟠 SHORT WATCH"
 
-    if np.isnan(signal["oi_change_pct"]):
+            tag = (
+                "🔴 STRONG SHORT WATCH"
+            )
+
+        else:
+
+            tag = (
+                "🟠 SHORT WATCH"
+            )
+
+    if np.isnan(
+        signal["oi_change_pct"]
+    ):
 
         oi_change = "N/A"
 
@@ -730,6 +906,36 @@ def build_message(
 
         oi_change = (
             f"{signal['oi_change_pct']:+.3f}%"
+        )
+
+    # Actual time from candle close
+    # to signal generation
+
+    alert_delay = (
+        signal["candle_close_time"]
+    )
+
+    alert_delay = (
+        signal_generated_at -
+        alert_delay
+    ).total_seconds()
+
+    if alert_delay <= 15:
+
+        timing_status = (
+            "🟢 FAST"
+        )
+
+    elif alert_delay <= 60:
+
+        timing_status = (
+            "🟡 DELAYED"
+        )
+
+    else:
+
+        timing_status = (
+            "🔴 LATE"
         )
 
     message = (
@@ -742,8 +948,18 @@ def build_message(
 
         f"⏱ *Interval:* `{INTERVAL}`\n"
 
-        f"🕐 *Closed Candle:* "
-        f"`{signal['candle_time'].strftime('%H:%M UTC')}`\n"
+        f"🕐 *Candle Open:* "
+        f"`{signal['candle_open_time'].strftime('%H:%M:%S UTC')}`\n"
+
+        f"🔒 *Candle Close:* "
+        f"`{signal['candle_close_time'].strftime('%H:%M:%S UTC')}`\n"
+
+        f"⚡ *Signal Generated:* "
+        f"`{signal_generated_at.strftime('%H:%M:%S UTC')}`\n"
+
+        f"⏱ *Alert Delay:* "
+        f"`{alert_delay:.1f} sec` "
+        f"{timing_status}\n"
 
         f"💵 *Price:* "
         f"`${signal['close']:,.2f}`\n"
@@ -773,7 +989,9 @@ def build_message(
 
         f"📋 *Confluences:*\n"
 
-        + "\n".join(reasons)
+        + "\n".join(
+            reasons
+        )
 
         + "\n"
 
@@ -816,15 +1034,34 @@ def run_engine():
             )
 
             # Process only once per candle
-            if latest_closed_time != last_processed_time:
+            if (
+                latest_closed_time
+                !=
+                last_processed_time
+            ):
 
-                last_processed_time = latest_closed_time
+                # Time when the bot detects
+                # the newly closed candle
+
+                detection_at = (
+                    pd.Timestamp.now(
+                        tz="UTC"
+                    )
+                )
+
+                last_processed_time = (
+                    latest_closed_time
+                )
 
                 # Calculate indicators
-                df = calculate_indicators(df)
+                df = calculate_indicators(
+                    df
+                )
 
                 # Fetch OI
-                df_oi = fetch_open_interest()
+                df_oi = (
+                    fetch_open_interest()
+                )
 
                 # Evaluate
                 signal = evaluate_scoring(
@@ -832,29 +1069,108 @@ def run_engine():
                     df_oi
                 )
 
-                long_score = signal["long_score"]
-                short_score = signal["short_score"]
+                # Time when signal calculation
+                # has finished
+
+                signal_generated_at = (
+                    pd.Timestamp.now(
+                        tz="UTC"
+                    )
+                )
+
+                long_score = (
+                    signal["long_score"]
+                )
+
+                short_score = (
+                    signal["short_score"]
+                )
+
+                # =================================================
+                # TIMING DIAGNOSTICS
+                # =================================================
+
+                detection_delay = (
+                    detection_at -
+                    signal["candle_close_time"]
+                ).total_seconds()
+
+                processing_delay = (
+                    signal_generated_at -
+                    detection_at
+                ).total_seconds()
+
+                total_signal_delay = (
+                    signal_generated_at -
+                    signal["candle_close_time"]
+                ).total_seconds()
+
+                print(
+                    "\n"
+                    "========== TIMING ==========\n"
+
+                    f"Candle Open: "
+                    f"{signal['candle_open_time']}\n"
+
+                    f"Candle Close: "
+                    f"{signal['candle_close_time']}\n"
+
+                    f"Detected: "
+                    f"{detection_at}\n"
+
+                    f"Signal Generated: "
+                    f"{signal_generated_at}\n"
+
+                    f"Detection Delay: "
+                    f"{detection_delay:.2f} sec\n"
+
+                    f"Processing Delay: "
+                    f"{processing_delay:.2f} sec\n"
+
+                    f"TOTAL Signal Delay: "
+                    f"{total_signal_delay:.2f} sec\n"
+
+                    "============================"
+                )
+
+                # =================================================
+                # NORMAL SIGNAL DATA
+                # =================================================
 
                 print(
                     "\n"
                     f"[{SYMBOL} {INTERVAL}] "
                     f"{latest_closed_time}\n"
+
                     f"Close: "
                     f"${signal['close']:,.2f}\n"
+
                     f"20 EMA: "
                     f"${signal['ema_20']:,.2f}\n"
+
                     f"200 EMA: "
                     f"${signal['ema_200']:,.2f}\n"
+
                     f"Volume Ratio: "
                     f"{signal['volume_ratio']:.2f}x\n"
+
                     f"Taker Delta: "
                     f"{signal['delta']:+,.1f} ETH "
                     f"({signal['delta_pct']:+.2f}%)\n"
+
                     f"OI: "
                     f"{signal['oi_status']} "
-                    f"({signal['oi_change_pct'] if not np.isnan(signal['oi_change_pct']) else 'N/A'}%)\n"
+
+                    f"("
+                    f"{signal['oi_change_pct'] "
+                    f"if not np.isnan("
+                    f"signal['oi_change_pct']"
+                    f") else 'N/A'}"
+                    f"%)\n"
+
                     f"Long Score: "
                     f"{long_score}/6\n"
+
                     f"Short Score: "
                     f"{short_score}/6"
                 )
@@ -865,25 +1181,51 @@ def run_engine():
 
                 if (
                     long_score >= MIN_SCORE
-                    and long_score > short_score
+                    and
+                    long_score > short_score
                 ):
 
                     new_signal = (
-                        last_alert_direction != "LONG"
-                        or last_alert_score is None
-                        or long_score > last_alert_score
+
+                        last_alert_direction
+                        !=
+                        "LONG"
+
+                        or
+                        last_alert_score
+                        is None
+
+                        or
+                        long_score
+                        >
+                        last_alert_score
                     )
 
                     if new_signal:
 
-                        message = build_message(
-                            signal,
-                            "LONG"
+                        message = (
+                            build_message(
+                                signal,
+                                "LONG",
+                                signal_generated_at
+                            )
                         )
 
-                        if send_telegram_alert(message):
+                        (
+                            sent_ok,
+                            telegram_sent_at,
+                            telegram_duration
+                        ) = (
+                            send_telegram_alert(
+                                message
+                            )
+                        )
 
-                            last_alert_direction = "LONG"
+                        if sent_ok:
+
+                            last_alert_direction = (
+                                "LONG"
+                            )
 
                             last_alert_score = (
                                 long_score
@@ -893,31 +1235,67 @@ def run_engine():
                                 "🟢 LONG alert sent."
                             )
 
+                            print(
+                                "Telegram sent at: "
+                                f"{telegram_sent_at}"
+                            )
+
+                            print(
+                                "Telegram API duration: "
+                                f"{telegram_duration:.2f} sec"
+                            )
+
                 # =================================================
                 # SHORT
                 # =================================================
 
                 elif (
                     short_score >= MIN_SCORE
-                    and short_score > long_score
+                    and
+                    short_score > long_score
                 ):
 
                     new_signal = (
-                        last_alert_direction != "SHORT"
-                        or last_alert_score is None
-                        or short_score > last_alert_score
+
+                        last_alert_direction
+                        !=
+                        "SHORT"
+
+                        or
+                        last_alert_score
+                        is None
+
+                        or
+                        short_score
+                        >
+                        last_alert_score
                     )
 
                     if new_signal:
 
-                        message = build_message(
-                            signal,
-                            "SHORT"
+                        message = (
+                            build_message(
+                                signal,
+                                "SHORT",
+                                signal_generated_at
+                            )
                         )
 
-                        if send_telegram_alert(message):
+                        (
+                            sent_ok,
+                            telegram_sent_at,
+                            telegram_duration
+                        ) = (
+                            send_telegram_alert(
+                                message
+                            )
+                        )
 
-                            last_alert_direction = "SHORT"
+                        if sent_ok:
+
+                            last_alert_direction = (
+                                "SHORT"
+                            )
 
                             last_alert_score = (
                                 short_score
@@ -925,6 +1303,16 @@ def run_engine():
 
                             print(
                                 "🔴 SHORT alert sent."
+                            )
+
+                            print(
+                                "Telegram sent at: "
+                                f"{telegram_sent_at}"
+                            )
+
+                            print(
+                                "Telegram API duration: "
+                                f"{telegram_duration:.2f} sec"
                             )
 
                 # =================================================
@@ -937,11 +1325,15 @@ def run_engine():
                         "⚪ No high-confluence setup."
                     )
 
-                    # Reset state when setup disappears
                     last_alert_direction = None
+
                     last_alert_score = None
 
-            time.sleep(POLL_SECONDS)
+            # Check every 10 seconds
+
+            time.sleep(
+                POLL_SECONDS
+            )
 
         except Exception as e:
 
@@ -957,4 +1349,5 @@ def run_engine():
 # ============================================================
 
 if __name__ == "__main__":
+
     run_engine()
