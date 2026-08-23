@@ -31,6 +31,18 @@ POLL_SECONDS = 3
 # below that level, the bot treats it as a failed hold / rejection.
 BREAKOUT_HOLD_TOLERANCE_PCT = 0.15
 
+# ------------------------------------------------------------
+# PRE-BREAKOUT WATCH
+# ------------------------------------------------------------
+# The normal engine waits for a CLOSED candle for confirmation.
+# This live watch warns when the CURRENT candle is approaching
+# resistance with bullish confluence, so a fast breakout is not
+# first reported only after the move has already happened.
+PRE_BREAKOUT_DISTANCE_PCT = 0.20
+PRE_BREAKOUT_MIN_CONFLUENCE = 4
+PRE_BREAKOUT_MIN_VOLUME_RATIO = 0.80
+PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS = 60
+
 # Phase 2 = 8 factor system
 MIN_SCORE = 6
 MAX_SCORE = 8
@@ -741,6 +753,166 @@ def detect_breakout_rejection(df):
             result["long_blocked"] = True
 
     return result
+
+
+# ============================================================
+# PRE-BREAKOUT WATCH — LIVE FORMING CANDLE
+# ============================================================
+
+def detect_pre_breakout_watch(df):
+    """
+    Early warning only — NOT a confirmed LONG signal.
+
+    The normal engine evaluates the last CLOSED candle. This
+    function additionally looks at the CURRENT forming candle and
+    warns when price is close to the resistance defined by the last
+    closed candle's recent_high.
+
+    Confirmation still requires a closed candle above resistance
+    and/or a valid hold/retest. The watch never authorizes a trade.
+    """
+    if len(df) < 25:
+        return {
+            "active": False,
+            "status": "Insufficient data",
+            "level": np.nan,
+            "distance_pct": np.nan,
+            "confluence": 0,
+            "reasons": []
+        }
+
+    closed = df.iloc[-2]
+    live = df.iloc[-1]
+
+    live_price = float(live["close"])
+
+    # Use BOTH a short local resistance and the broader 20-candle
+    # resistance. For fast moves, the immediate local level is often
+    # the one that matters first (for example 2431/2432), while the
+    # 20-candle high can be much farther away.
+    local_resistance = float(df["high"].iloc[-9:-1].max())
+    broad_resistance = closed["recent_high"]
+
+    resistance_candidates = [local_resistance]
+    if not pd.isna(broad_resistance):
+        resistance_candidates.append(float(broad_resistance))
+
+    # Pick the nearest resistance ABOVE the current live price.
+    above_price = [
+        level for level in resistance_candidates
+        if level > live_price
+    ]
+
+    if not above_price:
+        return {
+            "active": False,
+            "status": "No nearby resistance detected",
+            "level": np.nan,
+            "distance_pct": np.nan,
+            "confluence": 0,
+            "reasons": []
+        }
+
+    resistance = min(above_price)
+    distance_pct = ((resistance - live_price) / resistance) * 100
+
+    near_resistance = (
+        distance_pct >= 0
+        and
+        distance_pct <= PRE_BREAKOUT_DISTANCE_PCT
+    )
+
+    # If the CURRENT candle has already traded through this level,
+    # it is no longer a pre-breakout state.
+    if float(live["high"]) > resistance:
+        near_resistance = False
+
+    reasons = []
+    confluence = 0
+
+    ema_bullish = (
+        float(closed["ema_20"]) > float(closed["ema_50"])
+        and
+        float(closed["ema_50"]) > float(closed["ema_200"])
+    )
+
+    if ema_bullish:
+        confluence += 1
+        reasons.append("EMA 20 > 50 > 200")
+
+    if float(closed["close"]) > float(closed["ema_20"]):
+        confluence += 1
+        reasons.append("Last close above EMA20")
+
+    volume_ratio = float(closed["volume_ratio"])
+    if not np.isnan(volume_ratio) and volume_ratio >= PRE_BREAKOUT_MIN_VOLUME_RATIO:
+        confluence += 1
+        reasons.append(f"Volume {volume_ratio:.2f}x average")
+
+    if (
+        float(closed["macd"]) > float(closed["macd_signal"])
+        and
+        float(closed["macd_hist"]) > 0
+    ):
+        confluence += 1
+        reasons.append("MACD bullish")
+
+    if (
+        float(closed["delta"]) > 0
+        and
+        float(closed["cvd_change"]) > 0
+    ):
+        confluence += 1
+        reasons.append("Positive Delta + CVD")
+
+    if float(closed["close"]) > float(closed["open"]):
+        confluence += 1
+        reasons.append("Last candle bullish")
+
+    active = (
+        near_resistance
+        and
+        confluence >= PRE_BREAKOUT_MIN_CONFLUENCE
+    )
+
+    if active:
+        status = "PRE-BREAKOUT WATCH — resistance approaching"
+    elif near_resistance:
+        status = "Near resistance — weak confluence"
+    else:
+        status = "No pre-breakout setup"
+
+    return {
+        "active": active,
+        "status": status,
+        "level": resistance,
+        "distance_pct": distance_pct,
+        "confluence": confluence,
+        "reasons": reasons
+    }
+
+
+def build_pre_breakout_message(watch, generated_at):
+    level = watch["level"]
+    distance = watch["distance_pct"]
+    reasons = watch["reasons"]
+
+    return (
+        f"🟡 *PRE-BREAKOUT WATCH*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *Pair:* `{SYMBOL}`\n"
+        f"⏱ *Interval:* `{INTERVAL}`\n"
+        f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+        f"🎯 *Resistance:* `${level:,.2f}`\n"
+        f"📏 *Distance:* `{distance:.2f}%`\n"
+        f"🔥 *Bullish Confluence:* `{watch['confluence']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 *Why it is being watched:*\n"
+        + "\n".join(f"✅ {r}" for r in reasons)
+        + "\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *WATCH ONLY — NOT A LONG SIGNAL*\n"
+        f"Wait for breakout close above `${level:,.2f}` and hold/retest confirmation."
+    )
 
 
 # ============================================================
@@ -1477,11 +1649,19 @@ def run_engine():
         " EMA + Volume + OI + Delta/CVD +"
         " Liquidity + Absorption + MACD + Price Action"
     )
+    print(
+        "🟡 Pre-breakout live watch enabled: "
+        f"within {PRE_BREAKOUT_DISTANCE_PCT:.2f}% of resistance"
+    )
 
     last_processed_time = None
 
     last_alert_direction = None
     last_alert_score = None
+
+    # Pre-breakout watch state. Separate from confirmed signals.
+    last_pre_breakout_key = None
+    last_pre_breakout_sent_at = None
 
     while True:
 
@@ -1492,6 +1672,53 @@ def run_engine():
             # ------------------------------------------------
 
             df = fetch_klines()
+
+            # ------------------------------------------------
+            # LIVE PRE-BREAKOUT WATCH
+            # ------------------------------------------------
+            # Runs on the CURRENT forming candle. It does not replace
+            # the confirmed closed-candle engine below.
+            try:
+                live_df = calculate_indicators(df)
+                pre_breakout = detect_pre_breakout_watch(live_df)
+
+                if pre_breakout["active"]:
+                    current_live_candle = live_df.iloc[-1]["open_time"]
+                    watch_key = (
+                        current_live_candle,
+                        round(float(pre_breakout["level"]), 4)
+                    )
+                    now = utc_now()
+
+                    cooldown_ok = (
+                        last_pre_breakout_sent_at is None
+                        or
+                        (now - last_pre_breakout_sent_at).total_seconds()
+                        >= PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
+                    )
+
+                    if (
+                        watch_key != last_pre_breakout_key
+                        and
+                        cooldown_ok
+                    ):
+                        watch_message = build_pre_breakout_message(
+                            pre_breakout,
+                            now
+                        )
+
+                        if send_telegram_alert(watch_message):
+                            last_pre_breakout_key = watch_key
+                            last_pre_breakout_sent_at = now
+                            print(
+                                "🟡 PRE-BREAKOUT WATCH alert sent. "
+                                f"Resistance: ${pre_breakout['level']:,.2f}"
+                            )
+
+            except Exception as pre_error:
+                print(
+                    f"⚠️ Pre-breakout watch error: {pre_error}"
+                )
 
             latest_closed_time = (
                 df.iloc[-2]["open_time"]
