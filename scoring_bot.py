@@ -25,23 +25,9 @@ OI_LIMIT = 100
 
 POLL_SECONDS = 3
 
-# Existing Phase 1 threshold
-MIN_SCORE = 5
-
-# Phase 2 settings
-LEVEL_LOOKBACK = 50
-SWING_WINDOW = 3
-
-# Distance allowed between price and an important level.
-# 0.25% means price can be within 0.25% of the level.
-LEVEL_TOLERANCE_PCT = 0.25
-
-# Minimum wick/body relationship for rejection.
-# 1.0 means wick >= body.
-MIN_WICK_BODY_RATIO = 1.0
-
-# Phase 2 rejection threshold
-MIN_REJECTION_SCORE = 3
+# Phase 2 = 8 factor system
+MIN_SCORE = 6
+MAX_SCORE = 8
 
 
 # ============================================================
@@ -75,6 +61,7 @@ def send_telegram_alert(message: str):
     }
 
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -92,6 +79,7 @@ def send_telegram_alert(message: str):
         return True
 
     except requests.RequestException as e:
+
         print(f"Telegram request error: {e}")
         return False
 
@@ -160,6 +148,7 @@ def fetch_klines(
     ]
 
     for col in numeric_columns:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
@@ -266,14 +255,17 @@ def fetch_open_interest(
 
 
 # ============================================================
-# INDICATORS
+# INDICATORS — PHASE 2
 # ============================================================
 
 def calculate_indicators(df):
 
     df = df.copy()
 
-    # EMA 20
+    # --------------------------------------------------------
+    # EMA 20 / 50 / 200
+    # --------------------------------------------------------
+
     df["ema_20"] = (
         df["close"]
         .ewm(
@@ -283,7 +275,15 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # EMA 200
+    df["ema_50"] = (
+        df["close"]
+        .ewm(
+            span=50,
+            adjust=False
+        )
+        .mean()
+    )
+
     df["ema_200"] = (
         df["close"]
         .ewm(
@@ -293,51 +293,105 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # Volume average
+    # --------------------------------------------------------
+    # Volume
+    # --------------------------------------------------------
+
     df["vol_sma_20"] = (
         df["volume"]
         .rolling(20)
         .mean()
     )
 
-    # Volume ratio
     df["volume_ratio"] = (
         df["volume"]
         /
         df["vol_sma_20"]
     )
 
-    # Taker sell
+    # --------------------------------------------------------
+    # Taker Delta
+    # --------------------------------------------------------
+
     df["taker_sell_base"] = (
         df["volume"]
         -
         df["taker_buy_base"]
     )
 
-    # Taker delta
     df["delta"] = (
         df["taker_buy_base"]
         -
         df["taker_sell_base"]
     )
 
-    # Delta %
     df["delta_pct"] = (
         df["delta"]
         /
-        df["volume"].replace(
-            0,
-            np.nan
-        )
+        df["volume"].replace(0, np.nan)
     ) * 100
 
+    # --------------------------------------------------------
     # CVD
+    # --------------------------------------------------------
+
     df["cvd"] = df["delta"].cumsum()
 
+    df["cvd_change"] = (
+        df["cvd"]
+        -
+        df["cvd"].shift(1)
+    )
+
+    # --------------------------------------------------------
+    # MACD 12 / 26 / 9
+    # --------------------------------------------------------
+
+    ema_12 = (
+        df["close"]
+        .ewm(
+            span=12,
+            adjust=False
+        )
+        .mean()
+    )
+
+    ema_26 = (
+        df["close"]
+        .ewm(
+            span=26,
+            adjust=False
+        )
+        .mean()
+    )
+
+    df["macd"] = (
+        ema_12 - ema_26
+    )
+
+    df["macd_signal"] = (
+        df["macd"]
+        .ewm(
+            span=9,
+            adjust=False
+        )
+        .mean()
+    )
+
+    df["macd_hist"] = (
+        df["macd"]
+        -
+        df["macd_signal"]
+    )
+
+    # --------------------------------------------------------
     # Candle structure
+    # --------------------------------------------------------
+
     df["body"] = (
-        df["close"] - df["open"]
-    ).abs()
+        (df["close"] - df["open"])
+        .abs()
+    )
 
     df["range"] = (
         df["high"] - df["low"]
@@ -353,6 +407,25 @@ def calculate_indicators(df):
         df[["open", "close"]].min(axis=1)
         -
         df["low"]
+    )
+
+    # --------------------------------------------------------
+    # Recent highs / lows
+    # Excludes current candle
+    # --------------------------------------------------------
+
+    df["recent_high"] = (
+        df["high"]
+        .rolling(20)
+        .max()
+        .shift(1)
+    )
+
+    df["recent_low"] = (
+        df["low"]
+        .rolling(20)
+        .min()
+        .shift(1)
     )
 
     return df
@@ -449,21 +522,13 @@ def calculate_oi_state(
         return result
 
     oi_change_pct = (
-        (
-            current_oi
-            -
-            previous_oi
-        )
+        (current_oi - previous_oi)
         /
         previous_oi
     ) * 100
 
     price_change_pct = (
-        (
-            close
-            -
-            previous_close
-        )
+        (close - previous_close)
         /
         previous_close
     ) * 100
@@ -506,419 +571,155 @@ def calculate_oi_state(
 
 
 # ============================================================
-# PHASE 2 — LEVEL DETECTION
+# LIQUIDITY / SWEEP DETECTION
 # ============================================================
 
-def find_phase2_levels(df):
+def detect_liquidity(df):
 
     latest = df.iloc[-2]
 
-    levels = []
+    recent_high = latest["recent_high"]
+    recent_low = latest["recent_low"]
 
-    # --------------------------------------------------------
-    # EMA LEVELS
-    # --------------------------------------------------------
-
-    levels.append({
-        "name": "EMA 20",
-        "price": float(latest["ema_20"]),
-        "type": "EMA"
-    })
-
-    levels.append({
-        "name": "EMA 200",
-        "price": float(latest["ema_200"]),
-        "type": "EMA"
-    })
-
-    # --------------------------------------------------------
-    # RECENT SWING HIGH / RESISTANCE
-    # --------------------------------------------------------
-
-    start = max(
-        0,
-        len(df) - LEVEL_LOOKBACK - 2
-    )
-
-    end = len(df) - 2
-
-    recent = df.iloc[start:end]
-
-    swing_highs = []
-
-    for i in range(
-        SWING_WINDOW,
-        len(recent) - SWING_WINDOW
-    ):
-
-        high = float(
-            recent.iloc[i]["high"]
-        )
-
-        left = recent.iloc[
-            i - SWING_WINDOW:i
-        ]["high"].max()
-
-        right = recent.iloc[
-            i + 1:i + 1 + SWING_WINDOW
-        ]["high"].max()
-
-        if (
-            high >= left
-            and
-            high >= right
-        ):
-            swing_highs.append(high)
-
-    if swing_highs:
-
-        resistance = max(
-            swing_highs
-        )
-
-        levels.append({
-            "name": "Recent Resistance",
-            "price": resistance,
-            "type": "RESISTANCE"
-        })
-
-    # --------------------------------------------------------
-    # RECENT SWING LOW / SUPPORT
-    # --------------------------------------------------------
-
-    swing_lows = []
-
-    for i in range(
-        SWING_WINDOW,
-        len(recent) - SWING_WINDOW
-    ):
-
-        low = float(
-            recent.iloc[i]["low"]
-        )
-
-        left = recent.iloc[
-            i - SWING_WINDOW:i
-        ]["low"].min()
-
-        right = recent.iloc[
-            i + 1:i + 1 + SWING_WINDOW
-        ]["low"].min()
-
-        if (
-            low <= left
-            and
-            low <= right
-        ):
-            swing_lows.append(low)
-
-    if swing_lows:
-
-        support = min(
-            swing_lows
-        )
-
-        levels.append({
-            "name": "Recent Support",
-            "price": support,
-            "type": "SUPPORT"
-        })
-
-    return levels
-
-
-# ============================================================
-# PHASE 2 — REJECTION DETECTION
-# ============================================================
-
-def detect_rejection(
-    df,
-    levels
-):
-
-    latest = df.iloc[-2]
-    previous = df.iloc[-3]
-    previous2 = df.iloc[-4]
-
-    close = float(latest["close"])
-    open_price = float(latest["open"])
     high = float(latest["high"])
     low = float(latest["low"])
+    close = float(latest["close"])
 
-    body = max(
-        float(latest["body"]),
-        1e-9
-    )
+    result = {
+        "status": "Neutral",
+        "long": False,
+        "short": False,
+        "level": np.nan
+    }
 
-    upper_wick = float(
-        latest["upper_wick"]
-    )
+    if pd.isna(recent_high) or pd.isna(recent_low):
+        return result
 
-    lower_wick = float(
-        latest["lower_wick"]
-    )
-
-    volume_ratio = float(
-        latest["volume_ratio"]
-    )
-
-    delta = float(
-        latest["delta"]
-    )
-
-    candidates = []
-
-    for level in levels:
-
-        level_price = level["price"]
-
-        distance_pct = (
-            abs(close - level_price)
-            /
-            level_price
-        ) * 100
-
-        # ----------------------------------------------------
-        # Price must be reasonably close to level
-        # ----------------------------------------------------
-
-        if distance_pct > LEVEL_TOLERANCE_PCT:
-            continue
-
-        # ----------------------------------------------------
-        # BEARISH REJECTION
-        #
-        # Price trades at/above level
-        # but closes below it.
-        # ----------------------------------------------------
-
-        bearish_touch = (
-            high >= level_price
-            * (1 - LEVEL_TOLERANCE_PCT / 100)
-        )
-
-        bearish_close = (
-            close < level_price
-        )
-
-        bearish_candle = (
-            close < open_price
-        )
-
-        strong_upper_wick = (
-            upper_wick
-            >=
-            body * MIN_WICK_BODY_RATIO
-        )
-
-        if (
-            bearish_touch
-            and
-            bearish_close
-            and
-            strong_upper_wick
-        ):
-
-            rejection_score = 0
-            reasons = []
-
-            rejection_score += 1
-            reasons.append(
-                "Price tested important level"
-            )
-
-            rejection_score += 1
-            reasons.append(
-                "Upper-wick rejection"
-            )
-
-            rejection_score += 1
-            reasons.append(
-                "Candle closed below level"
-            )
-
-            if bearish_candle:
-                rejection_score += 1
-                reasons.append(
-                    "Bearish rejection candle"
-                )
-
-            if (
-                volume_ratio >= 1.2
-            ):
-                rejection_score += 1
-                reasons.append(
-                    f"Volume {volume_ratio:.2f}x average"
-                )
-
-            if delta < 0:
-                rejection_score += 1
-                reasons.append(
-                    "Negative taker delta"
-                )
-
-            # Check consecutive rejection/failure
-            previous_close = float(
-                previous["close"]
-            )
-
-            previous2_close = float(
-                previous2["close"]
-            )
-
-            consecutive_failure = (
-                previous_close < level_price
-                and
-                previous2_close < level_price
-            )
-
-            if consecutive_failure:
-                rejection_score += 1
-                reasons.append(
-                    "Multi-candle level failure"
-                )
-
-            candidates.append({
-                "direction": "SHORT",
-                "level_name": level["name"],
-                "level_type": level["type"],
-                "level_price": level_price,
-                "distance_pct": distance_pct,
-                "rejection_score": rejection_score,
-                "wick_ratio": (
-                    upper_wick / body
-                ),
-                "reasons": reasons
-            })
-
-        # ----------------------------------------------------
-        # BULLISH REJECTION
-        #
-        # Price trades at/below level
-        # but closes above it.
-        # ----------------------------------------------------
-
-        bullish_touch = (
-            low <= level_price
-            * (1 + LEVEL_TOLERANCE_PCT / 100)
-        )
-
-        bullish_close = (
-            close > level_price
-        )
-
-        bullish_candle = (
-            close > open_price
-        )
-
-        strong_lower_wick = (
-            lower_wick
-            >=
-            body * MIN_WICK_BODY_RATIO
-        )
-
-        if (
-            bullish_touch
-            and
-            bullish_close
-            and
-            strong_lower_wick
-        ):
-
-            rejection_score = 0
-            reasons = []
-
-            rejection_score += 1
-            reasons.append(
-                "Price tested important level"
-            )
-
-            rejection_score += 1
-            reasons.append(
-                "Lower-wick rejection"
-            )
-
-            rejection_score += 1
-            reasons.append(
-                "Candle closed above level"
-            )
-
-            if bullish_candle:
-                rejection_score += 1
-                reasons.append(
-                    "Bullish rejection candle"
-                )
-
-            if (
-                volume_ratio >= 1.2
-            ):
-                rejection_score += 1
-                reasons.append(
-                    f"Volume {volume_ratio:.2f}x average"
-                )
-
-            if delta > 0:
-                rejection_score += 1
-                reasons.append(
-                    "Positive taker delta"
-                )
-
-            previous_close = float(
-                previous["close"]
-            )
-
-            previous2_close = float(
-                previous2["close"]
-            )
-
-            consecutive_failure = (
-                previous_close > level_price
-                and
-                previous2_close > level_price
-            )
-
-            if consecutive_failure:
-                rejection_score += 1
-                reasons.append(
-                    "Multi-candle level failure"
-                )
-
-            candidates.append({
-                "direction": "LONG",
-                "level_name": level["name"],
-                "level_type": level["type"],
-                "level_price": level_price,
-                "distance_pct": distance_pct,
-                "rejection_score": rejection_score,
-                "wick_ratio": (
-                    lower_wick / body
-                ),
-                "reasons": reasons
-            })
-
-    if not candidates:
-        return None
-
-    # Strongest rejection only
-    candidates.sort(
-        key=lambda x: x["rejection_score"],
-        reverse=True
-    )
-
-    strongest = candidates[0]
+    # --------------------------------------------------------
+    # Bearish liquidity sweep
+    # Price takes previous high but closes back below it
+    # --------------------------------------------------------
 
     if (
-        strongest["rejection_score"]
-        <
-        MIN_REJECTION_SCORE
+        high > recent_high
+        and
+        close < recent_high
     ):
-        return None
 
-    return strongest
+        result["status"] = "Bearish Liquidity Sweep"
+        result["short"] = True
+        result["level"] = recent_high
+
+        return result
+
+    # --------------------------------------------------------
+    # Bullish liquidity sweep
+    # Price takes previous low but closes back above it
+    # --------------------------------------------------------
+
+    if (
+        low < recent_low
+        and
+        close > recent_low
+    ):
+
+        result["status"] = "Bullish Liquidity Sweep"
+        result["long"] = True
+        result["level"] = recent_low
+
+        return result
+
+    # --------------------------------------------------------
+    # Breakout context
+    # --------------------------------------------------------
+
+    if close > recent_high:
+
+        result["status"] = "High Liquidity Broken"
+        result["long"] = True
+        result["level"] = recent_high
+
+    elif close < recent_low:
+
+        result["status"] = "Low Liquidity Broken"
+        result["short"] = True
+        result["level"] = recent_low
+
+    return result
 
 
 # ============================================================
-# PHASE 1 SCORING
+# ABSORPTION / TRAP DETECTION
+# ============================================================
+
+def detect_absorption(df):
+
+    latest = df.iloc[-2]
+
+    body = float(latest["body"])
+    candle_range = float(latest["range"])
+    volume_ratio = float(latest["volume_ratio"])
+    delta_pct = float(latest["delta_pct"])
+
+    upper_wick = float(latest["upper_wick"])
+    lower_wick = float(latest["lower_wick"])
+
+    result = {
+        "status": "Neutral",
+        "long": False,
+        "short": False
+    }
+
+    if candle_range <= 0:
+        return result
+
+    body_ratio = body / candle_range
+
+    # --------------------------------------------------------
+    # Bullish absorption
+    #
+    # Strong negative delta / selling pressure
+    # but price rejects lows and closes relatively strongly
+    # --------------------------------------------------------
+
+    if (
+        delta_pct < -5
+        and
+        volume_ratio >= 1.3
+        and
+        lower_wick >= body * 1.2
+        and
+        body_ratio < 0.60
+    ):
+
+        result["status"] = "Bullish Absorption"
+        result["long"] = True
+
+    # --------------------------------------------------------
+    # Bearish absorption
+    #
+    # Strong positive delta / buying pressure
+    # but price rejects highs
+    # --------------------------------------------------------
+
+    elif (
+        delta_pct > 5
+        and
+        volume_ratio >= 1.3
+        and
+        upper_wick >= body * 1.2
+        and
+        body_ratio < 0.60
+    ):
+
+        result["status"] = "Bearish Absorption"
+        result["short"] = True
+
+    return result
+
+
+# ============================================================
+# SCORING — PHASE 2
 # ============================================================
 
 def evaluate_scoring(
@@ -936,6 +737,7 @@ def evaluate_scoring(
     previous_close = float(previous["close"])
 
     ema_20 = float(latest["ema_20"])
+    ema_50 = float(latest["ema_50"])
     ema_200 = float(latest["ema_200"])
 
     volume = float(latest["volume"])
@@ -945,99 +747,109 @@ def evaluate_scoring(
     delta = float(latest["delta"])
     delta_pct = float(latest["delta_pct"])
 
+    cvd_change = float(
+        latest["cvd_change"]
+    ) if not pd.isna(latest["cvd_change"]) else 0
+
+    macd = float(latest["macd"])
+    macd_signal = float(latest["macd_signal"])
+    macd_hist = float(latest["macd_hist"])
+
     long_score = 0
     short_score = 0
 
     long_reasons = []
     short_reasons = []
 
-    # --------------------------------------------------------
-    # FACTOR 1 — PRICE VS EMA 200
-    # --------------------------------------------------------
+    # ========================================================
+    # FACTOR 1 — EMA 20 / 50 / 200
+    # ========================================================
 
-    if close > ema_200:
+    bullish_ema = (
+        ema_20 > ema_50
+        and
+        ema_50 > ema_200
+    )
 
-        long_score += 1
+    bearish_ema = (
+        ema_20 < ema_50
+        and
+        ema_50 < ema_200
+    )
 
-        long_reasons.append(
-            "✅ Price > 200 EMA"
-        )
-
-    elif close < ema_200:
-
-        short_score += 1
-
-        short_reasons.append(
-            "✅ Price < 200 EMA"
-        )
-
-    # --------------------------------------------------------
-    # FACTOR 2 — EMA 20 VS EMA 200
-    # --------------------------------------------------------
-
-    if ema_20 > ema_200:
+    if bullish_ema:
 
         long_score += 1
 
         long_reasons.append(
-            "✅ 20 EMA > 200 EMA"
+            "✅ EMA structure bullish "
+            "(20 > 50 > 200)"
         )
 
-    elif ema_20 < ema_200:
+    elif bearish_ema:
 
         short_score += 1
 
         short_reasons.append(
-            "✅ 20 EMA < 200 EMA"
+            "✅ EMA structure bearish "
+            "(20 < 50 < 200)"
         )
 
-    # --------------------------------------------------------
-    # FACTOR 3 — CLOSE VS EMA 20
-    # --------------------------------------------------------
-
-    if close > ema_20:
-
-        long_score += 1
+    else:
 
         long_reasons.append(
-            "✅ Close > 20 EMA"
+            "⚪ EMA structure mixed"
         )
-
-    elif close < ema_20:
-
-        short_score += 1
 
         short_reasons.append(
-            "✅ Close < 20 EMA"
+            "⚪ EMA structure mixed"
         )
 
-    # --------------------------------------------------------
-    # FACTOR 4 — VOLUME
-    # --------------------------------------------------------
+    # ========================================================
+    # FACTOR 2 — VOLUME
+    # ========================================================
 
     volume_confirmed = (
         not np.isnan(volume_ratio)
         and
-        volume_ratio > 1.0
-    )
-
-    volume_text = (
-        f"📊 Volume {volume_ratio:.2f}x average"
+        volume_ratio >= 1.0
     )
 
     if volume_confirmed:
 
+        if close > latest["open"]:
+
+            long_score += 1
+
+            long_reasons.append(
+                f"✅ Bullish volume "
+                f"({volume_ratio:.2f}x average)"
+            )
+
+        elif close < latest["open"]:
+
+            short_score += 1
+
+            short_reasons.append(
+                f"✅ Bearish volume "
+                f"({volume_ratio:.2f}x average)"
+            )
+
+    else:
+
         long_reasons.append(
-            volume_text
+            f"⚪ Volume weak "
+            f"({volume_ratio:.2f}x)"
         )
 
         short_reasons.append(
-            volume_text
+            f"⚪ Volume weak "
+            f"({volume_ratio:.2f}x)"
         )
 
-    # --------------------------------------------------------
-    # FACTOR 5 — OI
-    # --------------------------------------------------------
+    # ========================================================
+    # FACTOR 3 — OI
+    # ========================================================
 
     oi = calculate_oi_state(
         close=close,
@@ -1070,14 +882,14 @@ def evaluate_scoring(
     elif oi_status == "Short Covering":
 
         long_reasons.append(
-            f"⚠️ OI Short Covering "
+            f"⚠️ Short Covering "
             f"({oi_change_pct:+.3f}%)"
         )
 
     elif oi_status == "Long Unwinding":
 
         short_reasons.append(
-            f"⚠️ OI Long Unwinding "
+            f"⚠️ Long Unwinding "
             f"({oi_change_pct:+.3f}%)"
         )
 
@@ -1091,96 +903,203 @@ def evaluate_scoring(
             "⚪ OI Neutral / Unavailable"
         )
 
-    # --------------------------------------------------------
-    # FACTOR 6 — TAKER DELTA
-    # --------------------------------------------------------
+    # ========================================================
+    # FACTOR 4 — DELTA / CVD
+    # ========================================================
 
-    if delta > 0:
+    if (
+        delta > 0
+        and
+        cvd_change > 0
+    ):
 
         long_score += 1
 
         long_reasons.append(
-            f"✅ Taker Delta "
-            f"{delta:+,.1f} ETH "
+            f"✅ Positive Delta + CVD "
             f"({delta_pct:+.2f}%)"
         )
 
-    elif delta < 0:
+    elif (
+        delta < 0
+        and
+        cvd_change < 0
+    ):
 
         short_score += 1
 
         short_reasons.append(
-            f"✅ Taker Delta "
-            f"{delta:+,.1f} ETH "
+            f"✅ Negative Delta + CVD "
             f"({delta_pct:+.2f}%)"
         )
 
     else:
 
         long_reasons.append(
-            "⚪ Taker Delta Neutral"
+            "⚪ Delta/CVD mixed"
         )
 
         short_reasons.append(
-            "⚪ Taker Delta Neutral"
+            "⚪ Delta/CVD mixed"
         )
 
-    # --------------------------------------------------------
-    # VOLUME CONFIRMATION
-    # --------------------------------------------------------
+    # ========================================================
+    # FACTOR 5 — LIQUIDITY
+    # ========================================================
 
-    if volume_confirmed:
+    liquidity = detect_liquidity(df)
 
-        if long_score > short_score:
+    liquidity_status = liquidity["status"]
 
-            long_score += 1
+    if liquidity["long"]:
 
-            long_reasons.append(
-                "📈 Volume confirms bullish momentum"
-            )
+        long_score += 1
 
-        elif short_score > long_score:
+        long_reasons.append(
+            f"💧 {liquidity_status}"
+        )
 
-            short_score += 1
+    elif liquidity["short"]:
 
-            short_reasons.append(
-                "📉 Volume confirms bearish momentum"
-            )
+        short_score += 1
 
-    # --------------------------------------------------------
-    # PHASE 2 LEVEL DETECTION
-    # --------------------------------------------------------
+        short_reasons.append(
+            f"💧 {liquidity_status}"
+        )
 
-    levels = find_phase2_levels(df)
+    else:
 
-    rejection = detect_rejection(
-        df,
-        levels
+        long_reasons.append(
+            "⚪ No clear liquidity event"
+        )
+
+        short_reasons.append(
+            "⚪ No clear liquidity event"
+        )
+
+    # ========================================================
+    # FACTOR 6 — ABSORPTION / TRAP
+    # ========================================================
+
+    absorption = detect_absorption(df)
+
+    absorption_status = absorption["status"]
+
+    if absorption["long"]:
+
+        long_score += 1
+
+        long_reasons.append(
+            f"🧲 {absorption_status}"
+        )
+
+    elif absorption["short"]:
+
+        short_score += 1
+
+        short_reasons.append(
+            f"🧲 {absorption_status}"
+        )
+
+    else:
+
+        long_reasons.append(
+            "⚪ No clear absorption"
+        )
+
+        short_reasons.append(
+            "⚪ No clear absorption"
+        )
+
+    # ========================================================
+    # FACTOR 7 — MACD 12 / 26 / 9
+    # ========================================================
+
+    if (
+        macd > macd_signal
+        and
+        macd_hist > 0
+    ):
+
+        long_score += 1
+
+        long_reasons.append(
+            "✅ MACD bullish "
+            "(MACD > Signal)"
+        )
+
+    elif (
+        macd < macd_signal
+        and
+        macd_hist < 0
+    ):
+
+        short_score += 1
+
+        short_reasons.append(
+            "✅ MACD bearish "
+            "(MACD < Signal)"
+        )
+
+    else:
+
+        long_reasons.append(
+            "⚪ MACD mixed"
+        )
+
+        short_reasons.append(
+            "⚪ MACD mixed"
+        )
+
+    # ========================================================
+    # FACTOR 8 — PRICE ACTION
+    # ========================================================
+
+    candle_open = float(latest["open"])
+
+    price_bullish = (
+        close > candle_open
+        and
+        close > ema_20
     )
 
-    # --------------------------------------------------------
-    # PHASE 2 SCORE
-    # --------------------------------------------------------
+    price_bearish = (
+        close < candle_open
+        and
+        close < ema_20
+    )
 
-    phase2_score = 0
+    if price_bullish:
 
-    if rejection:
+        long_score += 1
 
-        phase2_score = rejection[
-            "rejection_score"
-        ]
+        long_reasons.append(
+            "✅ Bullish price confirmation "
+            "(close > 20 EMA)"
+        )
 
-        if rejection["direction"] == "SHORT":
+    elif price_bearish:
 
-            short_reasons.append(
-                "🔴 Phase 2 Resistance Rejection"
-            )
+        short_score += 1
 
-        else:
+        short_reasons.append(
+            "✅ Bearish price confirmation "
+            "(close < 20 EMA)"
+        )
 
-            long_reasons.append(
-                "🟢 Phase 2 Support Rejection"
-            )
+    else:
+
+        long_reasons.append(
+            "⚪ Price confirmation mixed"
+        )
+
+        short_reasons.append(
+            "⚪ Price confirmation mixed"
+        )
+
+    # ========================================================
+    # RESULT
+    # ========================================================
 
     return {
 
@@ -1195,6 +1114,9 @@ def evaluate_scoring(
 
         "ema_20":
             ema_20,
+
+        "ema_50":
+            ema_50,
 
         "ema_200":
             ema_200,
@@ -1214,23 +1136,35 @@ def evaluate_scoring(
         "delta_pct":
             delta_pct,
 
+        "cvd_change":
+            cvd_change,
+
+        "macd":
+            macd,
+
+        "macd_signal":
+            macd_signal,
+
+        "macd_hist":
+            macd_hist,
+
         "oi_status":
             oi_status,
 
         "oi_change_pct":
             oi_change_pct,
 
+        "liquidity_status":
+            liquidity_status,
+
+        "absorption_status":
+            absorption_status,
+
         "long_score":
             long_score,
 
         "short_score":
             short_score,
-
-        "phase2_score":
-            phase2_score,
-
-        "rejection":
-            rejection,
 
         "long_reasons":
             long_reasons,
@@ -1253,26 +1187,29 @@ def build_message(
     if direction == "LONG":
 
         score = signal["long_score"]
-
         reasons = signal["long_reasons"]
 
-        tag = "🟢 LONG WATCH"
+        if score >= 7:
+            tag = "🟢 STRONG LONG WATCH"
+        else:
+            tag = "🟡 LONG WATCH"
 
     else:
 
         score = signal["short_score"]
-
         reasons = signal["short_reasons"]
 
-        tag = "🔴 SHORT WATCH"
+        if score >= 7:
+            tag = "🔴 STRONG SHORT WATCH"
+        else:
+            tag = "🟠 SHORT WATCH"
 
-    rejection = signal["rejection"]
+    if np.isnan(signal["oi_change_pct"]):
 
-    if np.isnan(
-        signal["oi_change_pct"]
-    ):
         oi_change = "N/A"
+
     else:
+
         oi_change = (
             f"{signal['oi_change_pct']:+.3f}%"
         )
@@ -1303,8 +1240,7 @@ def build_message(
 
     message = (
 
-        f"{tag} *(Phase 1 Score: "
-        f"{score}/6)*\n"
+        f"{tag} *(Score: {score}/{MAX_SCORE})*\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -1312,8 +1248,7 @@ def build_message(
 
         f"⏱ *Interval:* `{INTERVAL}`\n"
 
-        f"🕐 *Candle Open:* "
-        f"`{candle_time}`\n"
+        f"🕐 *Candle Open:* `{candle_time}`\n"
 
         f"🔒 *Candle Close:* "
         f"`{candle_close_time}`\n"
@@ -1327,102 +1262,68 @@ def build_message(
         f"💵 *Price:* "
         f"`${signal['close']:,.2f}`\n"
 
-        f"📈 *20 EMA:* "
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+
+        f"📈 *EMA 20:* "
         f"`${signal['ema_20']:,.2f}`\n"
 
-        f"📉 *200 EMA:* "
+        f"📈 *EMA 50:* "
+        f"`${signal['ema_50']:,.2f}`\n"
+
+        f"📉 *EMA 200:* "
         f"`${signal['ema_200']:,.2f}`\n"
 
         f"📊 *Volume:* "
         f"`{signal['volume_ratio']:.2f}x`\n"
 
-        f"📊 *Taker Delta:* "
+        f"📊 *Delta:* "
         f"`{signal['delta']:+,.1f} ETH`\n"
 
         f"📊 *Delta %:* "
         f"`{signal['delta_pct']:+.2f}%`\n"
 
-        f"⚡ *OI:* "
+        f"📊 *CVD Change:* "
+        f"`{signal['cvd_change']:+,.1f}`\n"
+
+        f"⚡ *OI State:* "
         f"`{signal['oi_status']}`\n"
 
         f"⚡ *OI Change:* "
         f"`{oi_change}`\n"
 
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-    )
+        f"📈 *MACD:* "
+        f"`{signal['macd']:.4f}`\n"
 
-    # --------------------------------------------------------
-    # PHASE 2 MESSAGE
-    # --------------------------------------------------------
+        f"📉 *MACD Signal:* "
+        f"`{signal['macd_signal']:.4f}`\n"
 
-    if rejection:
+        f"📊 *MACD Histogram:* "
+        f"`{signal['macd_hist']:.4f}`\n"
 
-        direction_text = (
-            "🔴 RESISTANCE REJECTION"
-            if rejection["direction"] == "SHORT"
-            else
-            "🟢 SUPPORT REJECTION"
-        )
+        f"💧 *Liquidity:* "
+        f"`{signal['liquidity_status']}`\n"
 
-        message += (
-
-            f"🎯 *PHASE 2: "
-            f"{direction_text}*\n"
-
-            f"📍 *Level:* "
-            f"`{rejection['level_name']}`\n"
-
-            f"💵 *Level Price:* "
-            f"`${rejection['level_price']:,.2f}`\n"
-
-            f"📏 *Distance:* "
-            f"`{rejection['distance_pct']:.3f}%`\n"
-
-            f"🕯️ *Wick/Body:* "
-            f"`{rejection['wick_ratio']:.2f}x`\n"
-
-            f"🎯 *Rejection Score:* "
-            f"`{rejection['rejection_score']}`\n"
-
-            f"📋 *Rejection Evidence:*\n"
-
-            +
-            "\n".join(
-                f"• {r}"
-                for r in rejection["reasons"]
-            )
-
-            +
-            "\n\n"
-        )
-
-    else:
-
-        message += (
-            "⚪ *PHASE 2:* "
-            "No measurable rejection detected\n\n"
-        )
-
-    message += (
+        f"🧲 *Absorption:* "
+        f"`{signal['absorption_status']}`\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
-        f"📋 *Phase 1 Confluences:*\n"
+        f"📋 *Phase 2 Confluences:*\n"
 
         +
-        "\n".join(
-            reasons
-        )
+        "\n".join(reasons)
 
         +
-        "\n\n"
+        "\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
-        f"⚠️ *WATCH ONLY — Human chart "
-        f"verification required.*\n"
+        f"⚠️ *WATCH ONLY*\n"
 
-        f"⚠️ *Phase 2 does NOT execute trades.*"
+        f"Human chart verification required.\n"
+
+        f"Level / breakout / retest confirmation "
+        f"is still required before any trade."
     )
 
     return message
@@ -1435,13 +1336,14 @@ def build_message(
 def run_engine():
 
     print(
-        f"🚀 ETH Signal Engine started "
+        f"🚀 PHASE 2 ETH Signal Engine started "
         f"for {SYMBOL} {INTERVAL}"
     )
 
     print(
-        "🧠 Phase 2 Support/Resistance "
-        "Rejection Detection: ACTIVE"
+        "📊 8-Factor Engine:"
+        " EMA + Volume + OI + Delta/CVD +"
+        " Liquidity + Absorption + MACD + Price Action"
     )
 
     last_processed_time = None
@@ -1464,7 +1366,7 @@ def run_engine():
             )
 
             # ------------------------------------------------
-            # PROCESS ONCE PER CLOSED CANDLE
+            # PROCESS ONLY ONCE PER CLOSED CANDLE
             # ------------------------------------------------
 
             if (
@@ -1489,12 +1391,10 @@ def run_engine():
                 # OI
                 # ------------------------------------------------
 
-                df_oi = (
-                    fetch_open_interest()
-                )
+                df_oi = fetch_open_interest()
 
                 # ------------------------------------------------
-                # SCORING
+                # PHASE 2 SCORING
                 # ------------------------------------------------
 
                 signal = evaluate_scoring(
@@ -1502,25 +1402,10 @@ def run_engine():
                     df_oi
                 )
 
-                signal_generated_at = (
-                    utc_now()
-                )
+                signal_generated_at = utc_now()
 
-                long_score = signal[
-                    "long_score"
-                ]
-
-                short_score = signal[
-                    "short_score"
-                ]
-
-                phase2_score = signal[
-                    "phase2_score"
-                ]
-
-                rejection = signal[
-                    "rejection"
-                ]
+                long_score = signal["long_score"]
+                short_score = signal["short_score"]
 
                 # ------------------------------------------------
                 # TIMING
@@ -1549,7 +1434,7 @@ def run_engine():
 
                 print(
                     "\n"
-                    "========== TIMING ==========\n"
+                    "========== PHASE 2 TIMING ==========\n"
 
                     f"Candle Open: "
                     f"{signal['candle_time']}\n"
@@ -1572,11 +1457,11 @@ def run_engine():
                     f"TOTAL Signal Delay: "
                     f"{total_signal_delay:.2f} sec\n"
 
-                    "============================"
+                    "===================================="
                 )
 
                 # ------------------------------------------------
-                # NORMAL LOG
+                # OI LOG
                 # ------------------------------------------------
 
                 if np.isnan(
@@ -1591,181 +1476,78 @@ def run_engine():
                         f"{signal['oi_change_pct']:+.3f}%"
                     )
 
+                # ------------------------------------------------
+                # NORMAL LOG
+                # ------------------------------------------------
+
                 print(
                     "\n"
-                    f"[{SYMBOL} {INTERVAL}] "
-                    f"{latest_closed_time}\n"
+                    f"[PHASE 2 | {SYMBOL} {INTERVAL}]\n"
 
                     f"Close: "
                     f"${signal['close']:,.2f}\n"
 
-                    f"20 EMA: "
+                    f"EMA20: "
                     f"${signal['ema_20']:,.2f}\n"
 
-                    f"200 EMA: "
+                    f"EMA50: "
+                    f"${signal['ema_50']:,.2f}\n"
+
+                    f"EMA200: "
                     f"${signal['ema_200']:,.2f}\n"
 
                     f"Volume Ratio: "
                     f"{signal['volume_ratio']:.2f}x\n"
 
-                    f"Taker Delta: "
+                    f"Delta: "
                     f"{signal['delta']:+,.1f} ETH "
                     f"({signal['delta_pct']:+.2f}%)\n"
+
+                    f"CVD Change: "
+                    f"{signal['cvd_change']:+,.1f}\n"
 
                     f"OI: "
                     f"{signal['oi_status']} "
                     f"({oi_log})\n"
 
+                    f"MACD: "
+                    f"{signal['macd']:.4f}\n"
+
+                    f"MACD Signal: "
+                    f"{signal['macd_signal']:.4f}\n"
+
+                    f"Liquidity: "
+                    f"{signal['liquidity_status']}\n"
+
+                    f"Absorption: "
+                    f"{signal['absorption_status']}\n"
+
                     f"Long Score: "
-                    f"{long_score}/6\n"
+                    f"{long_score}/{MAX_SCORE}\n"
 
                     f"Short Score: "
-                    f"{short_score}/6\n"
-
-                    f"Phase 2 Rejection Score: "
-                    f"{phase2_score}"
+                    f"{short_score}/{MAX_SCORE}"
                 )
 
                 # ------------------------------------------------
-                # PHASE 2 LOG
+                # LONG
                 # ------------------------------------------------
-
-                if rejection:
-
-                    print(
-                        "\n"
-                        "========== PHASE 2 ==========\n"
-
-                        f"Direction: "
-                        f"{rejection['direction']}\n"
-
-                        f"Level: "
-                        f"{rejection['level_name']}\n"
-
-                        f"Level Price: "
-                        f"${rejection['level_price']:,.2f}\n"
-
-                        f"Distance: "
-                        f"{rejection['distance_pct']:.3f}%\n"
-
-                        f"Wick/Body: "
-                        f"{rejection['wick_ratio']:.2f}x\n"
-
-                        f"Rejection Score: "
-                        f"{rejection['rejection_score']}\n"
-
-                        "=============================="
-                    )
-
-                else:
-
-                    print(
-                        "⚪ Phase 2: "
-                        "No measurable rejection."
-                    )
-
-                # =================================================
-                # SHORT SIGNAL
-                # =================================================
-
-                short_phase2_confirmed = (
-                    rejection is not None
-                    and
-                    rejection["direction"]
-                    == "SHORT"
-                    and
-                    phase2_score
-                    >=
-                    MIN_REJECTION_SCORE
-                )
 
                 if (
-                    short_score >= MIN_SCORE
-                    and
-                    short_score > long_score
-                    and
-                    short_phase2_confirmed
-                ):
-
-                    new_signal = (
-                        last_alert_direction
-                        !=
-                        "SHORT"
-                        or
-                        last_alert_score
-                        is None
-                        or
-                        short_score
-                        >
-                        last_alert_score
-                    )
-
-                    if new_signal:
-
-                        message = build_message(
-                            signal,
-                            "SHORT",
-                            signal_generated_at
-                        )
-
-                        if send_telegram_alert(
-                            message
-                        ):
-
-                            telegram_sent_at = (
-                                utc_now()
-                            )
-
-                            telegram_delay = (
-                                telegram_sent_at
-                                -
-                                signal_generated_at
-                            ).total_seconds()
-
-                            last_alert_direction = (
-                                "SHORT"
-                            )
-
-                            last_alert_score = (
-                                short_score
-                            )
-
-                            print(
-                                "🔴 SHORT Phase 2 "
-                                "alert sent."
-                            )
-
-                            print(
-                                "Telegram send delay: "
-                                f"{telegram_delay:.2f} sec"
-                            )
-
-                # =================================================
-                # LONG SIGNAL
-                # =================================================
-
-                elif (
                     long_score >= MIN_SCORE
                     and
                     long_score > short_score
-                    and
-                    rejection is not None
-                    and
-                    rejection["direction"]
-                    == "LONG"
-                    and
-                    phase2_score
-                    >=
-                    MIN_REJECTION_SCORE
                 ):
 
                     new_signal = (
+
                         last_alert_direction
                         !=
                         "LONG"
+
                         or
-                        last_alert_score
-                        is None
+                        last_alert_score is None
+
                         or
                         long_score
                         >
@@ -1780,13 +1562,9 @@ def run_engine():
                             signal_generated_at
                         )
 
-                        if send_telegram_alert(
-                            message
-                        ):
+                        if send_telegram_alert(message):
 
-                            telegram_sent_at = (
-                                utc_now()
-                            )
+                            telegram_sent_at = utc_now()
 
                             telegram_delay = (
                                 telegram_sent_at
@@ -1794,17 +1572,11 @@ def run_engine():
                                 signal_generated_at
                             ).total_seconds()
 
-                            last_alert_direction = (
-                                "LONG"
-                            )
-
-                            last_alert_score = (
-                                long_score
-                            )
+                            last_alert_direction = "LONG"
+                            last_alert_score = long_score
 
                             print(
-                                "🟢 LONG Phase 2 "
-                                "alert sent."
+                                "🟢 PHASE 2 LONG alert sent."
                             )
 
                             print(
@@ -1812,15 +1584,69 @@ def run_engine():
                                 f"{telegram_delay:.2f} sec"
                             )
 
-                # =================================================
-                # NO PHASE 2 SETUP
-                # =================================================
+                # ------------------------------------------------
+                # SHORT
+                # ------------------------------------------------
+
+                elif (
+                    short_score >= MIN_SCORE
+                    and
+                    short_score > long_score
+                ):
+
+                    new_signal = (
+
+                        last_alert_direction
+                        !=
+                        "SHORT"
+
+                        or
+                        last_alert_score is None
+
+                        or
+                        short_score
+                        >
+                        last_alert_score
+                    )
+
+                    if new_signal:
+
+                        message = build_message(
+                            signal,
+                            "SHORT",
+                            signal_generated_at
+                        )
+
+                        if send_telegram_alert(message):
+
+                            telegram_sent_at = utc_now()
+
+                            telegram_delay = (
+                                telegram_sent_at
+                                -
+                                signal_generated_at
+                            ).total_seconds()
+
+                            last_alert_direction = "SHORT"
+                            last_alert_score = short_score
+
+                            print(
+                                "🔴 PHASE 2 SHORT alert sent."
+                            )
+
+                            print(
+                                "Telegram send delay: "
+                                f"{telegram_delay:.2f} sec"
+                            )
+
+                # ------------------------------------------------
+                # NO HIGH CONFLUENCE
+                # ------------------------------------------------
 
                 else:
 
                     print(
-                        "⚪ No Phase 2 "
-                        "high-confluence setup."
+                        "⚪ No Phase 2 high-confluence setup."
                     )
 
                     last_alert_direction = None
@@ -1830,9 +1656,7 @@ def run_engine():
             # POLL
             # ------------------------------------------------
 
-            time.sleep(
-                POLL_SECONDS
-            )
+            time.sleep(POLL_SECONDS)
 
         except Exception as e:
 
