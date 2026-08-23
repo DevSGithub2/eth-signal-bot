@@ -31,6 +31,25 @@ MIN_SCORE = 5
 
 
 # ============================================================
+# PHASE 2 — LEVEL / REJECTION CONFIGURATION
+# ============================================================
+
+# Price can come this close to a level and still be considered
+# a test of that level.
+LEVEL_TOLERANCE_PCT = 0.0025
+
+# Minimum wick/body relationship required for rejection.
+# Example: 1.2 means wick must be at least 1.2x the candle body.
+REJECTION_WICK_RATIO = 1.2
+
+# Recent candles used for dynamic support/resistance.
+LEVEL_LOOKBACK = 30
+
+# Number of candles used to identify a local swing.
+SWING_WINDOW = 2
+
+
+# ============================================================
 # UTC TIME
 # ============================================================
 
@@ -287,7 +306,10 @@ def calculate_indicators(df):
 
     df = df.copy()
 
+    # ========================================================
     # EMA 20
+    # ========================================================
+
     df["ema_20"] = (
         df["close"]
         .ewm(
@@ -297,7 +319,23 @@ def calculate_indicators(df):
         .mean()
     )
 
+    # ========================================================
+    # EMA 50
+    # ========================================================
+
+    df["ema_50"] = (
+        df["close"]
+        .ewm(
+            span=50,
+            adjust=False
+        )
+        .mean()
+    )
+
+    # ========================================================
     # EMA 200
+    # ========================================================
+
     df["ema_200"] = (
         df["close"]
         .ewm(
@@ -307,35 +345,50 @@ def calculate_indicators(df):
         .mean()
     )
 
+    # ========================================================
     # 20-period volume average
+    # ========================================================
+
     df["vol_sma_20"] = (
         df["volume"]
         .rolling(20)
         .mean()
     )
 
+    # ========================================================
     # Volume ratio
+    # ========================================================
+
     df["volume_ratio"] = (
         df["volume"]
         /
         df["vol_sma_20"]
     )
 
+    # ========================================================
     # Taker sell volume
+    # ========================================================
+
     df["taker_sell_base"] = (
         df["volume"]
         -
         df["taker_buy_base"]
     )
 
+    # ========================================================
     # Taker Delta
+    # ========================================================
+
     df["delta"] = (
         df["taker_buy_base"]
         -
         df["taker_sell_base"]
     )
 
+    # ========================================================
     # Delta percentage
+    # ========================================================
+
     df["delta_pct"] = (
         df["delta"]
         /
@@ -345,13 +398,772 @@ def calculate_indicators(df):
         )
     ) * 100
 
+    # ========================================================
     # CVD
+    # ========================================================
+
     df["cvd"] = (
         df["delta"]
         .cumsum()
     )
 
     return df
+
+
+# ============================================================
+# PHASE 2 — LEVEL DETECTION
+# ============================================================
+
+def detect_levels(df, latest_index):
+
+    """
+    Detect dynamic levels using only candles BEFORE
+    the latest closed candle.
+
+    Levels:
+        EMA 20
+        EMA 50
+        EMA 200
+        Recent Resistance
+        Recent Support
+    """
+
+    levels = []
+
+    if latest_index < LEVEL_LOOKBACK + 5:
+
+        return levels
+
+    latest = df.iloc[latest_index]
+
+    # ========================================================
+    # EMA LEVELS
+    # ========================================================
+
+    ema_levels = [
+        (
+            "EMA 20",
+            float(latest["ema_20"])
+        ),
+        (
+            "EMA 50",
+            float(latest["ema_50"])
+        ),
+        (
+            "EMA 200",
+            float(latest["ema_200"])
+        )
+    ]
+
+    for name, price in ema_levels:
+
+        if np.isfinite(price):
+
+            levels.append({
+                "name": name,
+                "price": price,
+                "type": "EMA"
+            })
+
+    # ========================================================
+    # HISTORICAL WINDOW
+    # ========================================================
+
+    start_index = max(
+        0,
+        latest_index - LEVEL_LOOKBACK
+    )
+
+    historical = df.iloc[
+        start_index:latest_index
+    ].copy()
+
+    if historical.empty:
+
+        return levels
+
+    # ========================================================
+    # RECENT RESISTANCE
+    # ========================================================
+
+    resistance_price = float(
+        historical["high"].max()
+    )
+
+    resistance_time = historical.loc[
+        historical["high"].idxmax(),
+        "open_time"
+    ]
+
+    levels.append({
+        "name": "Recent Resistance",
+        "price": resistance_price,
+        "type": "RESISTANCE",
+        "time": resistance_time
+    })
+
+    # ========================================================
+    # RECENT SUPPORT
+    # ========================================================
+
+    support_price = float(
+        historical["low"].min()
+    )
+
+    support_time = historical.loc[
+        historical["low"].idxmin(),
+        "open_time"
+    ]
+
+    levels.append({
+        "name": "Recent Support",
+        "price": support_price,
+        "type": "SUPPORT",
+        "time": support_time
+    })
+
+    # ========================================================
+    # LOCAL SWING HIGH
+    # ========================================================
+
+    swing_highs = []
+
+    for i in range(
+        max(start_index + SWING_WINDOW, 0),
+        latest_index - SWING_WINDOW
+    ):
+
+        current_high = float(
+            df.iloc[i]["high"]
+        )
+
+        left_highs = df.iloc[
+            i - SWING_WINDOW:i
+        ]["high"]
+
+        right_highs = df.iloc[
+            i + 1:i + 1 + SWING_WINDOW
+        ]["high"]
+
+        if (
+            current_high >= left_highs.max()
+            and
+            current_high >= right_highs.max()
+        ):
+
+            swing_highs.append(
+                (
+                    current_high,
+                    df.iloc[i]["open_time"]
+                )
+            )
+
+    if swing_highs:
+
+        swing_high_price, swing_high_time = (
+            swing_highs[-1]
+        )
+
+        levels.append({
+            "name": "Recent Swing High",
+            "price": float(swing_high_price),
+            "type": "RESISTANCE",
+            "time": swing_high_time
+        })
+
+    # ========================================================
+    # LOCAL SWING LOW
+    # ========================================================
+
+    swing_lows = []
+
+    for i in range(
+        max(start_index + SWING_WINDOW, 0),
+        latest_index - SWING_WINDOW
+    ):
+
+        current_low = float(
+            df.iloc[i]["low"]
+        )
+
+        left_lows = df.iloc[
+            i - SWING_WINDOW:i
+        ]["low"]
+
+        right_lows = df.iloc[
+            i + 1:i + 1 + SWING_WINDOW
+        ]["low"]
+
+        if (
+            current_low <= left_lows.min()
+            and
+            current_low <= right_lows.min()
+        ):
+
+            swing_lows.append(
+                (
+                    current_low,
+                    df.iloc[i]["open_time"]
+                )
+            )
+
+    if swing_lows:
+
+        swing_low_price, swing_low_time = (
+            swing_lows[-1]
+        )
+
+        levels.append({
+            "name": "Recent Swing Low",
+            "price": float(swing_low_price),
+            "type": "SUPPORT",
+            "time": swing_low_time
+        })
+
+    return levels
+
+
+# ============================================================
+# PHASE 2 — REJECTION DETECTION
+# ============================================================
+
+def detect_rejection(
+    candle,
+    previous_candle,
+    levels
+):
+
+    """
+    Detect rejection of dynamic levels.
+
+    Resistance rejection:
+
+        Price reaches/crosses level
+        +
+        Upper wick is meaningful
+        +
+        Candle closes back below level
+
+    Support rejection:
+
+        Price reaches/crosses level
+        +
+        Lower wick is meaningful
+        +
+        Candle closes back above level
+
+    This function does NOT affect the 6-factor score yet.
+    """
+
+    open_price = float(candle["open"])
+    high = float(candle["high"])
+    low = float(candle["low"])
+    close = float(candle["close"])
+
+    previous_close = float(
+        previous_candle["close"]
+    )
+
+    body = abs(
+        close - open_price
+    )
+
+    # Avoid zero-body candles causing problems.
+    minimum_body = max(
+        close * 0.00005,
+        0.01
+    )
+
+    body_for_ratio = max(
+        body,
+        minimum_body
+    )
+
+    upper_wick = max(
+        0.0,
+        high - max(
+            open_price,
+            close
+        )
+    )
+
+    lower_wick = max(
+        0.0,
+        min(
+            open_price,
+            close
+        ) - low
+    )
+
+    upper_wick_ratio = (
+        upper_wick
+        /
+        body_for_ratio
+    )
+
+    lower_wick_ratio = (
+        lower_wick
+        /
+        body_for_ratio
+    )
+
+    best_resistance = None
+    best_support = None
+
+    # ========================================================
+    # SEARCH LEVELS
+    # ========================================================
+
+    for level in levels:
+
+        level_price = float(
+            level["price"]
+        )
+
+        if not np.isfinite(level_price):
+
+            continue
+
+        distance_pct = (
+            abs(
+                close - level_price
+            )
+            /
+            level_price
+        )
+
+        # ----------------------------------------------------
+        # RESISTANCE
+        # ----------------------------------------------------
+
+        if level["type"] in (
+            "EMA",
+            "RESISTANCE"
+        ):
+
+            touched_resistance = (
+                high
+                >=
+                level_price
+                *
+                (
+                    1
+                    -
+                    LEVEL_TOLERANCE_PCT
+                )
+            )
+
+            closed_below = (
+                close
+                <
+                level_price
+            )
+
+            crossed_above = (
+                high
+                >
+                level_price
+            )
+
+            meaningful_upper_wick = (
+                upper_wick_ratio
+                >=
+                REJECTION_WICK_RATIO
+            )
+
+            if (
+                touched_resistance
+                and
+                closed_below
+                and
+                meaningful_upper_wick
+            ):
+
+                rejection_strength = (
+                    upper_wick_ratio
+                )
+
+                candidate = {
+                    "detected": True,
+                    "type": "RESISTANCE REJECTION",
+                    "level_name": level["name"],
+                    "level_type": level["type"],
+                    "level_price": level_price,
+                    "distance_pct": distance_pct,
+                    "wick": upper_wick,
+                    "wick_ratio": upper_wick_ratio,
+                    "crossed_level": crossed_above,
+                    "candle_bearish": (
+                        close < open_price
+                    ),
+                    "previous_close": previous_close,
+                    "follow_through": False,
+                    "confirmed": False
+                }
+
+                if (
+                    best_resistance is None
+                    or
+                    candidate["wick_ratio"]
+                    >
+                    best_resistance[
+                        "wick_ratio"
+                    ]
+                ):
+
+                    best_resistance = candidate
+
+        # ----------------------------------------------------
+        # SUPPORT
+        # ----------------------------------------------------
+
+        if level["type"] in (
+            "EMA",
+            "SUPPORT"
+        ):
+
+            touched_support = (
+                low
+                <=
+                level_price
+                *
+                (
+                    1
+                    +
+                    LEVEL_TOLERANCE_PCT
+                )
+            )
+
+            closed_above = (
+                close
+                >
+                level_price
+            )
+
+            crossed_below = (
+                low
+                <
+                level_price
+            )
+
+            meaningful_lower_wick = (
+                lower_wick_ratio
+                >=
+                REJECTION_WICK_RATIO
+            )
+
+            if (
+                touched_support
+                and
+                closed_above
+                and
+                meaningful_lower_wick
+            ):
+
+                rejection_strength = (
+                    lower_wick_ratio
+                )
+
+                candidate = {
+                    "detected": True,
+                    "type": "SUPPORT REJECTION",
+                    "level_name": level["name"],
+                    "level_type": level["type"],
+                    "level_price": level_price,
+                    "distance_pct": distance_pct,
+                    "wick": lower_wick,
+                    "wick_ratio": lower_wick_ratio,
+                    "crossed_level": crossed_below,
+                    "candle_bullish": (
+                        close > open_price
+                    ),
+                    "previous_close": previous_close,
+                    "follow_through": False,
+                    "confirmed": False
+                }
+
+                if (
+                    best_support is None
+                    or
+                    candidate["wick_ratio"]
+                    >
+                    best_support[
+                        "wick_ratio"
+                    ]
+                ):
+
+                    best_support = candidate
+
+    # ========================================================
+    # CURRENT CANDLE REJECTION
+    # ========================================================
+
+    if (
+        best_resistance is not None
+        and
+        best_support is not None
+    ):
+
+        # If both are detected, choose the stronger one.
+        if (
+            best_resistance["wick_ratio"]
+            >=
+            best_support["wick_ratio"]
+        ):
+
+            return best_resistance
+
+        return best_support
+
+    if best_resistance is not None:
+
+        return best_resistance
+
+    if best_support is not None:
+
+        return best_support
+
+    return {
+        "detected": False,
+        "type": "NONE",
+        "level_name": None,
+        "level_type": None,
+        "level_price": np.nan,
+        "distance_pct": np.nan,
+        "wick": np.nan,
+        "wick_ratio": np.nan,
+        "crossed_level": False,
+        "confirmed": False,
+        "follow_through": False
+    }
+
+
+# ============================================================
+# PHASE 2 — CONFIRM PREVIOUS REJECTION
+# ============================================================
+
+def detect_follow_through(
+    current_candle,
+    previous_candle,
+    levels
+):
+
+    """
+    Checks whether the PREVIOUS candle rejected a level
+    and the CURRENT candle followed through.
+
+    This creates a one-candle-later confirmation.
+
+    Bearish example:
+
+        Previous candle rejects resistance
+        Current candle closes lower
+
+    Bullish example:
+
+        Previous candle rejects support
+        Current candle closes higher
+    """
+
+    previous_rejection = detect_rejection(
+        previous_candle,
+        None
+        if previous_candle is None
+        else previous_candle,
+        levels
+    )
+
+    if not previous_rejection["detected"]:
+
+        return {
+            "confirmed": False,
+            "type": "NONE",
+            "level_name": None,
+            "level_price": np.nan
+        }
+
+    current_open = float(
+        current_candle["open"]
+    )
+
+    current_close = float(
+        current_candle["close"]
+    )
+
+    previous_close = float(
+        previous_candle["close"]
+    )
+
+    # ========================================================
+    # RESISTANCE REJECTION FOLLOW-THROUGH
+    # ========================================================
+
+    if (
+        previous_rejection["type"]
+        ==
+        "RESISTANCE REJECTION"
+    ):
+
+        bearish_follow = (
+            current_close
+            <
+            previous_close
+            and
+            current_close
+            <=
+            current_open
+        )
+
+        if bearish_follow:
+
+            previous_rejection[
+                "confirmed"
+            ] = True
+
+            previous_rejection[
+                "follow_through"
+            ] = True
+
+            return previous_rejection
+
+    # ========================================================
+    # SUPPORT REJECTION FOLLOW-THROUGH
+    # ========================================================
+
+    if (
+        previous_rejection["type"]
+        ==
+        "SUPPORT REJECTION"
+    ):
+
+        bullish_follow = (
+            current_close
+            >
+            previous_close
+            and
+            current_close
+            >=
+            current_open
+        )
+
+        if bullish_follow:
+
+            previous_rejection[
+                "confirmed"
+            ] = True
+
+            previous_rejection[
+                "follow_through"
+            ] = True
+
+            return previous_rejection
+
+    return {
+        "confirmed": False,
+        "type": "NONE",
+        "level_name": None,
+        "level_price": np.nan
+    }
+
+
+# ============================================================
+# PHASE 2 — COMPLETE REJECTION ANALYSIS
+# ============================================================
+
+def analyze_phase2(
+    df
+):
+
+    """
+    Analyze the latest CLOSED candle.
+
+    Returns:
+        Current rejection
+        Previous rejection confirmation
+        Detected level
+    """
+
+    latest_index = len(df) - 2
+
+    latest = df.iloc[
+        latest_index
+    ]
+
+    previous = df.iloc[
+        latest_index - 1
+    ]
+
+    levels = detect_levels(
+        df,
+        latest_index
+    )
+
+    current_rejection = detect_rejection(
+        latest,
+        previous,
+        levels
+    )
+
+    previous_confirmation = (
+        detect_follow_through(
+            latest,
+            previous,
+            levels
+        )
+    )
+
+    # ========================================================
+    # PRIORITIZE CONFIRMED REJECTION
+    # ========================================================
+
+    if previous_confirmation.get(
+        "confirmed",
+        False
+    ):
+
+        final_rejection = (
+            previous_confirmation
+        )
+
+        final_rejection[
+            "signal_source"
+        ] = "PREVIOUS CANDLE + FOLLOW-THROUGH"
+
+    elif current_rejection.get(
+        "detected",
+        False
+    ):
+
+        final_rejection = (
+            current_rejection
+        )
+
+        final_rejection[
+            "signal_source"
+        ] = "CURRENT CANDLE"
+
+    else:
+
+        final_rejection = {
+            "detected": False,
+            "confirmed": False,
+            "follow_through": False,
+            "type": "NONE",
+            "level_name": None,
+            "level_type": None,
+            "level_price": np.nan,
+            "distance_pct": np.nan,
+            "wick": np.nan,
+            "wick_ratio": np.nan,
+            "signal_source": "NONE"
+        }
+
+    return {
+        "rejection": final_rejection,
+        "current_rejection": current_rejection,
+        "confirmed_rejection": previous_confirmation,
+        "levels": levels
+    }
 
 
 # ============================================================
@@ -581,6 +1393,10 @@ def evaluate_scoring(
 
     ema_20 = float(
         latest["ema_20"]
+    )
+
+    ema_50 = float(
+        latest["ema_50"]
     )
 
     ema_200 = float(
@@ -822,6 +1638,22 @@ def evaluate_scoring(
                 "📉 Volume confirms bearish momentum"
             )
 
+    # ========================================================
+    # PHASE 2 — REJECTION ANALYSIS
+    # ========================================================
+
+    phase2 = analyze_phase2(
+        df
+    )
+
+    rejection = phase2[
+        "rejection"
+    ]
+
+    # IMPORTANT:
+    # Phase 2 does NOT modify long_score/short_score yet.
+    # We first collect live data and test its accuracy.
+
     return {
 
         "candle_time":
@@ -835,6 +1667,9 @@ def evaluate_scoring(
 
         "ema_20":
             ema_20,
+
+        "ema_50":
+            ema_50,
 
         "ema_200":
             ema_200,
@@ -870,8 +1705,170 @@ def evaluate_scoring(
             long_reasons,
 
         "short_reasons":
-            short_reasons
+            short_reasons,
+
+        # ====================================================
+        # PHASE 2 DATA
+        # ====================================================
+
+        "phase2_rejection":
+            rejection,
+
+        "phase2_current_rejection":
+            phase2[
+                "current_rejection"
+            ],
+
+        "phase2_confirmed_rejection":
+            phase2[
+                "confirmed_rejection"
+            ],
+
+        "phase2_levels":
+            phase2[
+                "levels"
+            ]
     }
+
+
+# ============================================================
+# PHASE 2 — TELEGRAM TEXT
+# ============================================================
+
+def build_phase2_text(signal):
+
+    rejection = signal[
+        "phase2_rejection"
+    ]
+
+    if not rejection.get(
+        "detected",
+        False
+    ):
+
+        return (
+            "🧭 *Phase 2 Level Reaction:*\n"
+            "⚪ No confirmed level rejection"
+        )
+
+    level_name = rejection.get(
+        "level_name"
+    )
+
+    level_price = rejection.get(
+        "level_price"
+    )
+
+    wick_ratio = rejection.get(
+        "wick_ratio",
+        np.nan
+    )
+
+    distance_pct = rejection.get(
+        "distance_pct",
+        np.nan
+    )
+
+    crossed_level = rejection.get(
+        "crossed_level",
+        False
+    )
+
+    confirmed = rejection.get(
+        "confirmed",
+        False
+    )
+
+    signal_source = rejection.get(
+        "signal_source",
+        "UNKNOWN"
+    )
+
+    if (
+        level_price is None
+        or
+        not np.isfinite(level_price)
+    ):
+
+        level_text = "N/A"
+
+    else:
+
+        level_text = (
+            f"${level_price:,.2f}"
+        )
+
+    if np.isfinite(
+        distance_pct
+    ):
+
+        distance_text = (
+            f"{distance_pct * 100:.2f}%"
+        )
+
+    else:
+
+        distance_text = "N/A"
+
+    if np.isfinite(
+        wick_ratio
+    ):
+
+        wick_text = (
+            f"{wick_ratio:.2f}x body"
+        )
+
+    else:
+
+        wick_text = "N/A"
+
+    if confirmed:
+
+        confirmation_text = (
+            "✅ Confirmed + Follow-through"
+        )
+
+    else:
+
+        confirmation_text = (
+            "⚠️ Rejection detected — "
+            "follow-through not confirmed"
+        )
+
+    crossed_text = (
+        "YES"
+        if crossed_level
+        else
+        "NO"
+    )
+
+    return (
+
+        f"🧭 *Phase 2 Level Reaction:*\n"
+
+        f"{'🔴' if 'RESISTANCE' in rejection['type'] else '🟢'} "
+        f"*{rejection['type']}*\n"
+
+        f"📍 Level: "
+        f"`{level_name}`\n"
+
+        f"💵 Level Price: "
+        f"`{level_text}`\n"
+
+        f"📏 Distance: "
+        f"`{distance_text}`\n"
+
+        f"🕯 Wick: "
+        f"`{wick_text}`\n"
+
+        f"↕️ Level Crossed: "
+        f"`{crossed_text}`\n"
+
+        f"🔎 Source: "
+        f"`{signal_source}`\n"
+
+        f"{confirmation_text}"
+    )
 
 
 # ============================================================
@@ -956,6 +1953,7 @@ def build_message(
     )
 
     # Actual engine delay
+
     engine_delay = (
         generated_at
         -
@@ -965,6 +1963,14 @@ def build_message(
     if engine_delay < 0:
 
         engine_delay = 0
+
+    # ========================================================
+    # PHASE 2 TEXT
+    # ========================================================
+
+    phase2_text = build_phase2_text(
+        signal
+    )
 
     message = (
 
@@ -993,6 +1999,9 @@ def build_message(
 
         f"📈 *20 EMA:* "
         f"`${signal['ema_20']:,.2f}`\n"
+
+        f"📊 *50 EMA:* "
+        f"`${signal['ema_50']:,.2f}`\n"
 
         f"📉 *200 EMA:* "
         f"`${signal['ema_200']:,.2f}`\n"
@@ -1024,6 +2033,10 @@ def build_message(
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
+        f"{phase2_text}\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+
         f"⚠️ *WATCH ONLY — Human chart "
         f"verification & level/retest "
         f"confirmation required.*"
@@ -1043,6 +2056,20 @@ def run_engine():
         f"for {SYMBOL} {INTERVAL}"
     )
 
+    print(
+        "🧭 Phase 2 Level/Rejection Detection: ENABLED"
+    )
+
+    print(
+        f"📏 Level tolerance: "
+        f"{LEVEL_TOLERANCE_PCT * 100:.2f}%"
+    )
+
+    print(
+        f"🕯 Rejection wick ratio: "
+        f"{REJECTION_WICK_RATIO:.2f}x"
+    )
+
     last_processed_time = None
 
     last_alert_direction = None
@@ -1060,6 +2087,7 @@ def run_engine():
             df = fetch_klines()
 
             # Latest CLOSED candle
+
             latest_closed_time = (
                 df.iloc[-2]["open_time"]
             )
@@ -1177,7 +2205,7 @@ def run_engine():
                 )
 
                 # =================================================
-                # OI LOG VALUE
+                # NORMAL LOG
                 # =================================================
 
                 if np.isnan(
@@ -1192,10 +2220,6 @@ def run_engine():
                         f"{signal['oi_change_pct']:+.3f}%"
                     )
 
-                # =================================================
-                # NORMAL LOG
-                # =================================================
-
                 print(
                     "\n"
                     f"[{SYMBOL} {INTERVAL}] "
@@ -1206,6 +2230,9 @@ def run_engine():
 
                     f"20 EMA: "
                     f"${signal['ema_20']:,.2f}\n"
+
+                    f"50 EMA: "
+                    f"${signal['ema_50']:,.2f}\n"
 
                     f"200 EMA: "
                     f"${signal['ema_200']:,.2f}\n"
@@ -1226,6 +2253,76 @@ def run_engine():
 
                     f"Short Score: "
                     f"{short_score}/6"
+                )
+
+                # =================================================
+                # PHASE 2 LOG
+                # =================================================
+
+                rejection = signal[
+                    "phase2_rejection"
+                ]
+
+                print(
+                    "\n"
+                    "========== PHASE 2 ==========\n"
+                )
+
+                if rejection.get(
+                    "detected",
+                    False
+                ):
+
+                    print(
+                        f"Reaction: "
+                        f"{rejection['type']}"
+                    )
+
+                    print(
+                        f"Level: "
+                        f"{rejection['level_name']}"
+                    )
+
+                    if np.isfinite(
+                        rejection[
+                            "level_price"
+                        ]
+                    ):
+
+                        print(
+                            f"Level Price: "
+                            f"${rejection['level_price']:,.2f}"
+                        )
+
+                    if np.isfinite(
+                        rejection[
+                            "wick_ratio"
+                        ]
+                    ):
+
+                        print(
+                            f"Wick Ratio: "
+                            f"{rejection['wick_ratio']:.2f}x"
+                        )
+
+                    print(
+                        f"Confirmed: "
+                        f"{rejection.get('confirmed', False)}"
+                    )
+
+                    print(
+                        f"Follow-through: "
+                        f"{rejection.get('follow_through', False)}"
+                    )
+
+                else:
+
+                    print(
+                        "No level rejection detected."
+                    )
+
+                print(
+                    "=============================="
                 )
 
                 # =================================================
