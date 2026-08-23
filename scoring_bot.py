@@ -25,6 +25,12 @@ OI_LIMIT = 100
 
 POLL_SECONDS = 3
 
+# Breakout / rejection detection
+# A breakout must hold above the detected resistance.
+# If price breaks above resistance but the CLOSED candle returns
+# below that level, the bot treats it as a failed hold / rejection.
+BREAKOUT_HOLD_TOLERANCE_PCT = 0.15
+
 # Phase 2 = 8 factor system
 MIN_SCORE = 6
 MAX_SCORE = 8
@@ -649,6 +655,95 @@ def detect_liquidity(df):
 
 
 # ============================================================
+# BREAKOUT HOLD / REJECTION DETECTION
+# ============================================================
+
+def detect_breakout_rejection(df):
+    """
+    Detect two important 5M price-action events:
+
+    1) Failed breakout / failed hold:
+       A previous closed candle closes above its prior resistance,
+       but the latest closed candle closes back below that level.
+
+    2) Rejection at resistance:
+       Price trades above the latest resistance, leaves an upper wick,
+       and closes back below the resistance.
+
+    This is intentionally a price-action flag, not a separate scoring
+    factor, so the existing 8-factor score remains 0-8.
+    """
+
+    latest = df.iloc[-2]
+    previous = df.iloc[-3]
+
+    result = {
+        "status": "No clear breakout rejection",
+        "short": False,
+        "long_blocked": False,
+        "level": np.nan,
+        "failed_hold": False
+    }
+
+    latest_level = latest["recent_high"]
+    previous_level = previous["recent_high"]
+
+    if pd.isna(latest_level):
+        return result
+
+    level = float(latest_level)
+    high = float(latest["high"])
+    close = float(latest["close"])
+    body = float(latest["body"])
+    candle_range = float(latest["range"])
+    upper_wick = float(latest["upper_wick"])
+
+    if candle_range <= 0:
+        return result
+
+    # --------------------------------------------------------
+    # Strongest case: breakout happened, but the next candle
+    # could not hold above the breakout level.
+    # --------------------------------------------------------
+    if not pd.isna(previous_level):
+        previous_level = float(previous_level)
+        previous_close = float(previous["close"])
+
+        previous_broke_out = previous_close > previous_level
+        latest_failed_hold = close < previous_level
+
+        if previous_broke_out and latest_failed_hold:
+            result["status"] = "Bearish Breakout Failure / Hold Lost"
+            result["short"] = True
+            result["long_blocked"] = True
+            result["level"] = previous_level
+            result["failed_hold"] = True
+            return result
+
+    # --------------------------------------------------------
+    # Rejection at resistance even when there was no prior
+    # candle close above the level.
+    # --------------------------------------------------------
+    rejection_close = close < level
+    took_level = high > level
+    wick_rejection = (
+        upper_wick >= max(body * 1.2, candle_range * 0.20)
+    )
+
+    if took_level and rejection_close and wick_rejection:
+        result["status"] = "Bearish Resistance Rejection / Hold Failed"
+        result["short"] = True
+        result["level"] = level
+
+        # A meaningful close back below resistance means a LONG
+        # should not be generated from this candle.
+        if close < level * (1 - BREAKOUT_HOLD_TOLERANCE_PCT / 100):
+            result["long_blocked"] = True
+
+    return result
+
+
+# ============================================================
 # ABSORPTION / TRAP DETECTION
 # ============================================================
 
@@ -1052,10 +1147,15 @@ def evaluate_scoring(
         )
 
     # ========================================================
-    # FACTOR 8 — PRICE ACTION
+    # FACTOR 8 — PRICE ACTION + BREAKOUT HOLD
     # ========================================================
 
     candle_open = float(latest["open"])
+
+    breakout = detect_breakout_rejection(df)
+    breakout_status = breakout["status"]
+    breakout_level = breakout["level"]
+    long_blocked = breakout["long_blocked"]
 
     price_bullish = (
         close > candle_open
@@ -1069,7 +1169,28 @@ def evaluate_scoring(
         close < ema_20
     )
 
-    if price_bullish:
+    # Breakout failure / rejection has priority over ordinary
+    # bullish price confirmation. This is exactly the situation
+    # we want the bot to recognize at a resistance such as 2432.
+    if breakout["short"]:
+
+        short_score += 1
+
+        if pd.isna(breakout_level):
+            level_text = "dynamic resistance"
+        else:
+            level_text = f"${float(breakout_level):,.2f}"
+
+        short_reasons.append(
+            f"⚠️ {breakout_status} at {level_text}"
+        )
+
+        long_reasons.append(
+            f"🚫 Long blocked: resistance not held "
+            f"({level_text})"
+        )
+
+    elif price_bullish:
 
         long_score += 1
 
@@ -1159,6 +1280,15 @@ def evaluate_scoring(
 
         "absorption_status":
             absorption_status,
+
+        "breakout_status":
+            breakout_status,
+
+        "breakout_level":
+            breakout_level,
+
+        "long_blocked":
+            long_blocked,
 
         "long_score":
             long_score,
@@ -1305,6 +1435,8 @@ def build_message(
 
         f"🧲 *Absorption:* "
         f"`{signal['absorption_status']}`\n"
+        f"🚧 *Breakout / Hold:* "
+        f"`{signal['breakout_status']}`\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -1522,6 +1654,12 @@ def run_engine():
                     f"Absorption: "
                     f"{signal['absorption_status']}\n"
 
+                    f"Breakout / Hold: "
+                    f"{signal['breakout_status']}\n"
+
+                    f"Long Blocked: "
+                    f"{signal['long_blocked']}\n"
+
                     f"Long Score: "
                     f"{long_score}/{MAX_SCORE}\n"
 
@@ -1537,6 +1675,8 @@ def run_engine():
                     long_score >= MIN_SCORE
                     and
                     long_score > short_score
+                    and
+                    not signal["long_blocked"]
                 ):
 
                     new_signal = (
@@ -1645,9 +1785,15 @@ def run_engine():
 
                 else:
 
-                    print(
-                        "⚪ No Phase 2 high-confluence setup."
-                    )
+                    if signal["long_blocked"]:
+                        print(
+                            "🚫 LONG BLOCKED: breakout resistance was not held. "
+                            f"Reason: {signal['breakout_status']}"
+                        )
+                    else:
+                        print(
+                            "⚪ No Phase 2 high-confluence setup."
+                        )
 
                     last_alert_direction = None
                     last_alert_score = None
