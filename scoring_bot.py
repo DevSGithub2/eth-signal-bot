@@ -112,10 +112,6 @@ def detect_bullish_zone_rejection(
         score += 1
         reasons.append("High rejection volume")
 
-    if ema20 > ema50 > ema200:
-        score += 1
-        reasons.append("Bullish EMA structure")
-
     return RejectionResult(
         rejected=score >= BULLISH_REJECTION_MIN_SCORE,
         score=score,
@@ -1497,10 +1493,37 @@ def evaluate_scoring(
         if rejection.rejected:
             long_blocked = True
 
+    # Strict bullish price confirmation:
+    # A bullish candle above EMA20 alone is NOT enough for Factor 8.
+    # The candle must also show a confirmed breakout/hold above the
+    # detected resistance. This prevents a normal green candle inside
+    # a resistance zone from receiving a full price-action point.
+    resistance_level = latest["recent_high"]
+
+    breakout_hold_confirmed = (
+        not pd.isna(resistance_level)
+        and close > float(resistance_level)
+    )
+
+    # Optional retest-hold confirmation: the previous closed candle
+    # had already broken above its prior resistance, and the latest
+    # candle stayed above that same level while closing bullish.
+    retest_hold_confirmed = False
+    previous_resistance = previous["recent_high"]
+
+    if not pd.isna(previous_resistance):
+        previous_resistance = float(previous_resistance)
+        retest_hold_confirmed = (
+            float(previous["close"]) > previous_resistance
+            and close >= previous_resistance
+        )
+
     price_bullish = (
         close > candle_open
         and
         close > ema_20
+        and
+        (breakout_hold_confirmed or retest_hold_confirmed)
     )
 
     price_bearish = (
@@ -1534,9 +1557,17 @@ def evaluate_scoring(
 
         long_score += 1
 
+        if breakout_hold_confirmed:
+            confirmation_text = (
+                "breakout held above resistance + close > 20 EMA"
+            )
+        else:
+            confirmation_text = (
+                "retest held above resistance + close > 20 EMA"
+            )
+
         long_reasons.append(
-            "✅ Bullish price confirmation "
-            "(close > 20 EMA)"
+            f"✅ Bullish price confirmation ({confirmation_text})"
         )
 
     elif price_bearish:
@@ -2223,7 +2254,7 @@ def run_engine():
                     if signal["bullish_rejection"]:
                         print(
                             "🔴 BULLISH ZONE REJECTION: LONG INVALIDATED. "
-                            f"Score: {signal['bullish_rejection_score']}/7 | "
+                            f"Score: {signal['bullish_rejection_score']}/6 | "
                             f"Reasons: {', '.join(signal['bullish_rejection_reasons'])}"
                         )
                     elif signal["long_blocked"]:
