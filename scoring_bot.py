@@ -44,6 +44,16 @@ PRE_BREAKOUT_MIN_CONFLUENCE = 4
 PRE_BREAKOUT_MIN_VOLUME_RATIO = 0.80
 PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS = 60
 
+# ------------------------------------------------------------
+# PRE-BREAKOUT REJECTION / PULLBACK CONTEXT
+# ------------------------------------------------------------
+# After a PRE-BREAKOUT WATCH, remember a failed resistance attempt so
+# the next watch is clearly labelled as a SECOND ATTEMPT instead of
+# looking like a brand-new bullish signal.
+REJECTION_PULLBACK_MIN_DISTANCE_PCT = 0.10
+REJECTION_CONTEXT_MAX_AGE_SECONDS = 1800
+REJECTION_ALERT_COOLDOWN_SECONDS = 60
+
 # Phase 2 = 8 factor system
 MIN_SCORE = 6
 MAX_SCORE = 8
@@ -1053,6 +1063,71 @@ def build_pre_breakout_message(watch, generated_at):
 
 
 # ============================================================
+# REJECTION / PULLBACK CONTEXT MESSAGES
+# ============================================================
+
+def build_rejection_message(breakout, generated_at):
+    level = breakout.get("level")
+    level_text = "dynamic resistance" if pd.isna(level) else f"${float(level):,.2f}"
+
+    return (
+        f"🔴 *BREAKOUT REJECTION / HOLD FAILED*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *Pair:* `{SYMBOL}`\n"
+        f"⏱ *Interval:* `{INTERVAL}`\n"
+        f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+        f"🎯 *Resistance:* `{level_text}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"❌ Price failed to hold above resistance.\n"
+        f"🔻 Selling pressure / rejection detected.\n"
+        f"🚫 *LONG BLOCKED for this attempt.*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ Wait for a fresh setup. Do not treat the next bullish candle as an immediate LONG.\n"
+        f"Human chart verification required."
+    )
+
+
+def build_pullback_message(level, current_price, generated_at):
+    distance = abs(float(level) - float(current_price)) / float(level) * 100
+    return (
+        f"🔻 *PULLBACK AFTER REJECTION*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *Pair:* `{SYMBOL}`\n"
+        f"⏱ *Interval:* `{INTERVAL}`\n"
+        f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+        f"🎯 *Failed Resistance:* `${float(level):,.2f}`\n"
+        f"💵 *Price:* `${float(current_price):,.2f}`\n"
+        f"📏 *Distance from level:* `{distance:.2f}%`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔻 Price moved away after the failed breakout.\n"
+        f"⚠️ *NO LONG SIGNAL* — wait for a fresh reclaim / breakout attempt.\n"
+        f"Human chart verification required."
+    )
+
+
+def build_second_watch_message(watch, generated_at, previous_level):
+    level = watch["level"]
+    reasons = watch["reasons"]
+    return (
+        f"🟡 *SECOND BREAKOUT WATCH*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *Pair:* `{SYMBOL}`\n"
+        f"⏱ *Interval:* `{INTERVAL}`\n"
+        f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+        f"🎯 *Resistance:* `${level:,.2f}`\n"
+        f"📏 *Distance:* `{watch['distance_pct']:.2f}%`\n"
+        f"🔥 *Bullish Confluence:* `{watch['confluence']}`\n"
+        f"↩️ *Previous attempt:* rejection / pullback near `${float(previous_level):,.2f}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 *Current bullish conditions:*\n"
+        + "\n".join(f"✅ {r}" for r in reasons)
+        + "\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *WATCH ONLY — NOT A LONG SIGNAL*\n"
+        f"Need a fresh candle close above `${level:,.2f}` AND hold/retest confirmation."
+    )
+
+
+# ============================================================
 # ABSORPTION / TRAP DETECTION
 # ============================================================
 
@@ -1876,6 +1951,16 @@ def run_engine():
     last_pre_breakout_key = None
     last_pre_breakout_sent_at = None
 
+    # Rejection -> pullback -> second-watch state. This keeps the
+    # Telegram conversation sequential and prevents repeated bullish
+    # watch messages from hiding the failed breakout context.
+    rejection_context_level = None
+    rejection_context_at = None
+    rejection_alert_candle = None
+    pullback_alert_candle = None
+    second_watch_key = None
+    second_watch_sent_at = None
+
     # Market scanner state. Scanner is discovery-only for now; it does
     # not replace the ETH scoring engine or auto-trade selected coins.
     last_market_scan_at = None
@@ -1932,7 +2017,41 @@ def run_engine():
                         >= PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
                     )
 
-                    if (
+                    context_active = (
+                        rejection_context_level is not None
+                        and rejection_context_at is not None
+                        and (now - rejection_context_at).total_seconds() <= REJECTION_CONTEXT_MAX_AGE_SECONDS
+                    )
+
+                    if context_active:
+                        # A fresh approach to resistance after rejection is
+                        # explicitly labelled SECOND WATCH. It is still NOT
+                        # a LONG signal.
+                        second_key = (
+                            current_live_candle,
+                            round(float(pre_breakout["level"]), 4)
+                        )
+
+                        if (
+                            second_key != second_watch_key
+                            and cooldown_ok
+                        ):
+                            watch_message = build_second_watch_message(
+                                pre_breakout,
+                                now,
+                                rejection_context_level
+                            )
+
+                            if send_telegram_alert(watch_message):
+                                second_watch_key = second_key
+                                second_watch_sent_at = now
+                                last_pre_breakout_key = watch_key
+                                last_pre_breakout_sent_at = now
+                                print(
+                                    "🟡 SECOND BREAKOUT WATCH alert sent. "
+                                    f"Resistance: ${pre_breakout['level']:,.2f}"
+                                )
+                    elif (
                         watch_key != last_pre_breakout_key
                         and
                         cooldown_ok
@@ -1997,6 +2116,64 @@ def run_engine():
                 )
 
                 signal_generated_at = utc_now()
+
+                # ------------------------------------------------
+                # REJECTION -> PULLBACK CONTEXT
+                # ------------------------------------------------
+                # This runs once per CLOSED candle. It creates a Telegram
+                # event for a failed breakout, then a separate pullback
+                # event when price moves away from that failed level.
+                breakout_context = detect_breakout_rejection(df)
+
+                if breakout_context["short"] and not pd.isna(breakout_context["level"]):
+                    rejection_context_level = float(breakout_context["level"])
+                    rejection_context_at = signal_generated_at
+                    rejection_alert_candle = latest_closed_time
+                    pullback_alert_candle = None
+                    second_watch_key = None
+
+                    rejection_message = build_rejection_message(
+                        breakout_context, signal_generated_at
+                    )
+                    if send_telegram_alert(rejection_message):
+                        print(
+                            "🔴 BREAKOUT REJECTION alert sent. "
+                            f"Level: ${rejection_context_level:,.2f}"
+                        )
+
+                # If rejection context is active, report the first
+                # meaningful move away from the failed resistance.
+                if rejection_context_level is not None and rejection_context_at is not None:
+                    context_age = (signal_generated_at - rejection_context_at).total_seconds()
+                    latest_close = float(df.iloc[-2]["close"])
+
+                    if context_age <= REJECTION_CONTEXT_MAX_AGE_SECONDS:
+                        pullback_distance = (
+                            rejection_context_level - latest_close
+                        ) / rejection_context_level * 100
+
+                        if (
+                            pullback_distance >= REJECTION_PULLBACK_MIN_DISTANCE_PCT
+                            and latest_closed_time != rejection_alert_candle
+                            and latest_closed_time != pullback_alert_candle
+                        ):
+                            pullback_message = build_pullback_message(
+                                rejection_context_level,
+                                latest_close,
+                                signal_generated_at
+                            )
+                            if send_telegram_alert(pullback_message):
+                                pullback_alert_candle = latest_closed_time
+                                print(
+                                    "🔻 PULLBACK alert sent after failed breakout. "
+                                    f"Level: ${rejection_context_level:,.2f}"
+                                )
+                    else:
+                        rejection_context_level = None
+                        rejection_context_at = None
+                        rejection_alert_candle = None
+                        pullback_alert_candle = None
+                        second_watch_key = None
 
                 long_score = signal["long_score"]
                 short_score = signal["short_score"]
