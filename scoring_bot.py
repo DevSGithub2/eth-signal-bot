@@ -1,5 +1,6 @@
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import requests
@@ -46,6 +47,146 @@ PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS = 60
 # Phase 2 = 8 factor system
 MIN_SCORE = 6
 MAX_SCORE = 8
+
+# ============================================================
+# BULLISH ZONE REJECTION DETECTOR
+# ============================================================
+# This is a LONG invalidation detector. It does NOT create a
+# SHORT signal by itself. A separate bearish setup must qualify
+# before the normal SHORT engine can alert.
+BULLISH_REJECTION_MIN_SCORE = 4
+BULLISH_REJECTION_VOLUME_MULTIPLIER = 1.30
+BULLISH_REJECTION_WICK_RATIO = 0.40
+
+@dataclass
+class RejectionResult:
+    rejected: bool
+    score: int
+    reasons: list
+
+def detect_bullish_zone_rejection(
+    candle,
+    ema20,
+    ema50,
+    ema200,
+    resistance,
+    volume,
+    avg_volume,
+    close_below_level=True,
+):
+    """Detect rejection of a bullish/resistance zone.
+
+    IMPORTANT: this function only invalidates LONG. It does not
+    create a SHORT signal.
+    """
+    o = float(candle["open"])
+    h = float(candle["high"])
+    l = float(candle["low"])
+    c = float(candle["close"])
+
+    candle_range = max(h - l, 1e-9)
+    upper_wick = h - max(o, c)
+    upper_wick_ratio = upper_wick / candle_range
+
+    score = 0
+    reasons = []
+
+    touched_zone = h >= float(resistance)
+    if touched_zone:
+        score += 1
+        reasons.append("Bullish zone/resistance tested")
+
+    if touched_zone and upper_wick_ratio >= BULLISH_REJECTION_WICK_RATIO:
+        score += 1
+        reasons.append("Large upper wick rejection")
+
+    if touched_zone and close_below_level and c < float(resistance):
+        score += 2
+        reasons.append("Close back below bullish zone")
+
+    if touched_zone and c < o:
+        score += 1
+        reasons.append("Bearish rejection candle")
+
+    if avg_volume > 0 and volume >= avg_volume * BULLISH_REJECTION_VOLUME_MULTIPLIER:
+        score += 1
+        reasons.append("High rejection volume")
+
+    if ema20 > ema50 > ema200:
+        score += 1
+        reasons.append("Bullish EMA structure")
+
+    return RejectionResult(
+        rejected=score >= BULLISH_REJECTION_MIN_SCORE,
+        score=score,
+        reasons=reasons,
+    )
+
+
+# ============================================================
+# BINANCE FUTURES MARKET SCANNER
+# ============================================================
+MARKET_SCANNER_ENABLED = os.getenv("MARKET_SCANNER_ENABLED", "true").lower() == "true"
+MARKET_SCANNER_MIN_VOLUME_USDT = float(os.getenv("MARKET_SCANNER_MIN_VOLUME_USDT", "20000000"))
+MARKET_SCANNER_TOP_N = int(os.getenv("MARKET_SCANNER_TOP_N", "10"))
+MARKET_SCANNER_INTERVAL_SECONDS = int(os.getenv("MARKET_SCANNER_INTERVAL_SECONDS", "60"))
+BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+BINANCE_24H_TICKER_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+
+def get_futures_symbols():
+    response = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    return {
+        s["symbol"] for s in data.get("symbols", [])
+        if s.get("contractType") == "PERPETUAL"
+        and s.get("quoteAsset") == "USDT"
+        and s.get("status") == "TRADING"
+    }
+
+def get_24h_tickers():
+    response = requests.get(BINANCE_24H_TICKER_URL, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+def scan_market(min_volume_usdt=MARKET_SCANNER_MIN_VOLUME_USDT, top_n=MARKET_SCANNER_TOP_N):
+    symbols = get_futures_symbols()
+    tickers = get_24h_tickers()
+    candidates = []
+    for t in tickers:
+        symbol = t.get("symbol")
+        if symbol not in symbols:
+            continue
+        try:
+            price = float(t["lastPrice"])
+            change = float(t["priceChangePercent"])
+            volume = float(t["quoteVolume"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if volume < min_volume_usdt:
+            continue
+        candidates.append({
+            "symbol": symbol,
+            "price": price,
+            "change_24h": change,
+            "volume_24h": volume,
+        })
+    candidates.sort(key=lambda x: x["volume_24h"], reverse=True)
+    return candidates[:top_n]
+
+def format_scanner_log(candidates):
+    if not candidates:
+        return "No qualifying Futures candidates."
+    lines = ["\n===== BINANCE FUTURES MARKET SCANNER ====="]
+    for i, coin in enumerate(candidates, 1):
+        lines.append(
+            f"{i:02d}. {coin['symbol']} | "
+            f"24h {coin['change_24h']:+.2f}% | "
+            f"Volume ${coin['volume_24h']/1_000_000:.2f}M | "
+            f"Price ${coin['price']:,.8f}"
+        )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -1329,6 +1470,33 @@ def evaluate_scoring(
     breakout_level = breakout["level"]
     long_blocked = breakout["long_blocked"]
 
+    # New bullish-zone rejection detector. Use the latest closed
+    # candle and the same dynamic resistance used by the price-action
+    # engine. This ONLY blocks LONG; it does not add a SHORT point.
+    rejection_level = breakout_level
+    if pd.isna(rejection_level):
+        rejection_level = latest["recent_high"]
+
+    rejection = RejectionResult(False, 0, [])
+    if not pd.isna(rejection_level):
+        rejection = detect_bullish_zone_rejection(
+            candle={
+                "open": latest["open"],
+                "high": latest["high"],
+                "low": latest["low"],
+                "close": latest["close"],
+            },
+            ema20=ema_20,
+            ema50=ema_50,
+            ema200=ema_200,
+            resistance=float(rejection_level),
+            volume=volume,
+            avg_volume=volume_avg,
+            close_below_level=True,
+        )
+        if rejection.rejected:
+            long_blocked = True
+
     price_bullish = (
         close > candle_open
         and
@@ -1609,6 +1777,9 @@ def build_message(
         f"`{signal['absorption_status']}`\n"
         f"🚧 *Breakout / Hold:* "
         f"`{signal['breakout_status']}`\n"
+        f"🔴 *Bullish Rejection:* "
+        f"`{signal['bullish_rejection']} "
+        f"(score {signal['bullish_rejection_score']})`\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -1663,6 +1834,10 @@ def run_engine():
     last_pre_breakout_key = None
     last_pre_breakout_sent_at = None
 
+    # Market scanner state. Scanner is discovery-only for now; it does
+    # not replace the ETH scoring engine or auto-trade selected coins.
+    last_market_scan_at = None
+
     while True:
 
         try:
@@ -1672,6 +1847,24 @@ def run_engine():
             # ------------------------------------------------
 
             df = fetch_klines()
+
+            # ------------------------------------------------
+            # BINANCE FUTURES MARKET SCANNER
+            # ------------------------------------------------
+            if MARKET_SCANNER_ENABLED:
+                now = utc_now()
+                scanner_due = (
+                    last_market_scan_at is None
+                    or (now - last_market_scan_at).total_seconds() >= MARKET_SCANNER_INTERVAL_SECONDS
+                )
+                if scanner_due:
+                    try:
+                        candidates = scan_market()
+                        print(format_scanner_log(candidates))
+                        last_market_scan_at = now
+                    except Exception as scanner_error:
+                        print(f"⚠️ Futures scanner error: {scanner_error}")
+                        last_market_scan_at = now
 
             # ------------------------------------------------
             # LIVE PRE-BREAKOUT WATCH
@@ -1887,6 +2080,10 @@ def run_engine():
                     f"Long Blocked: "
                     f"{signal['long_blocked']}\n"
 
+                    f"Bullish Rejection: "
+                    f"{signal['bullish_rejection']} "
+                    f"(score {signal['bullish_rejection_score']})\n"
+
                     f"Long Score: "
                     f"{long_score}/{MAX_SCORE}\n"
 
@@ -2012,7 +2209,13 @@ def run_engine():
 
                 else:
 
-                    if signal["long_blocked"]:
+                    if signal["bullish_rejection"]:
+                        print(
+                            "🔴 BULLISH ZONE REJECTION: LONG INVALIDATED. "
+                            f"Score: {signal['bullish_rejection_score']}/7 | "
+                            f"Reasons: {', '.join(signal['bullish_rejection_reasons'])}"
+                        )
+                    elif signal["long_blocked"]:
                         print(
                             "🚫 LONG BLOCKED: breakout resistance was not held. "
                             f"Reason: {signal['breakout_status']}"
