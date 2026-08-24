@@ -15,94 +15,6 @@ import numpy as np
 SYMBOL = os.getenv("SYMBOL", "ETHUSDT")
 INTERVAL = os.getenv("INTERVAL", "5m")
 
-# ============================================================
-# MULTI-COIN FUTURES SCANNER
-# ============================================================
-
-BINANCE_EXCHANGE_INFO_URL = (
-    "https://fapi.binance.com/fapi/v1/exchangeInfo"
-)
-
-BINANCE_24H_TICKER_URL = (
-    "https://fapi.binance.com/fapi/v1/ticker/24hr"
-)
-
-SCANNER_MIN_VOLUME_USDT = 20_000_000
-SCANNER_MAX_COINS = 10
-
-
-def get_futures_symbols():
-
-    response = requests.get(
-        BINANCE_EXCHANGE_INFO_URL,
-        timeout=10
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    symbols = []
-
-    for s in data["symbols"]:
-
-        if (
-            s["contractType"] == "PERPETUAL"
-            and s["quoteAsset"] == "USDT"
-            and s["status"] == "TRADING"
-        ):
-            symbols.append(s["symbol"])
-
-    return symbols
-
-
-def get_24h_tickers():
-
-    response = requests.get(
-        BINANCE_24H_TICKER_URL,
-        timeout=10
-    )
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-def scan_market():
-
-    symbols = set(get_futures_symbols())
-    tickers = get_24h_tickers()
-
-    candidates = []
-
-    for ticker in tickers:
-
-        symbol = ticker["symbol"]
-
-        if symbol not in symbols:
-            continue
-
-        volume = float(ticker["quoteVolume"])
-
-        if volume < SCANNER_MIN_VOLUME_USDT:
-            continue
-
-        candidates.append({
-            "symbol": symbol,
-            "price": float(ticker["lastPrice"]),
-            "change_24h": float(
-                ticker["priceChangePercent"]
-            ),
-            "volume_24h": volume
-        })
-
-    candidates.sort(
-        key=lambda x: x["volume_24h"],
-        reverse=True
-    )
-
-    return candidates[:SCANNER_MAX_COINS]
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
@@ -336,10 +248,11 @@ def send_telegram_alert(message: str):
 # ============================================================
 
 def fetch_klines(
-    symbol,
+    symbol=SYMBOL,
     interval=INTERVAL,
     limit=KLINE_LIMIT
 ):
+
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -1912,14 +1825,14 @@ def run_engine():
         f"within {PRE_BREAKOUT_DISTANCE_PCT:.2f}% of resistance"
     )
 
-    last_processed_time = {}
+    last_processed_time = None
 
-    last_alert_direction = {}
-    last_alert_score = {}
+    last_alert_direction = None
+    last_alert_score = None
 
     # Pre-breakout watch state. Separate from confirmed signals.
-    last_pre_breakout_key = {}
-    last_pre_breakout_sent_at = {]
+    last_pre_breakout_key = None
+    last_pre_breakout_sent_at = None
 
     # Market scanner state. Scanner is discovery-only for now; it does
     # not replace the ETH scoring engine or auto-trade selected coins.
@@ -1964,29 +1877,23 @@ def run_engine():
 
                 if pre_breakout["active"]:
                     current_live_candle = live_df.iloc[-1]["open_time"]
-                   watch_key = (
-    current_live_candle,
-    round(float(pre_breakout["level"]), 4)
-)
+                    watch_key = (
+                        current_live_candle,
+                        round(float(pre_breakout["level"]), 4)
+                    )
+                    now = utc_now()
 
-now = utc_now()
+                    cooldown_ok = (
+                        last_pre_breakout_sent_at is None
+                        or
+                        (now - last_pre_breakout_sent_at).total_seconds()
+                        >= PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
+                    )
 
-previous_sent_at = last_pre_breakout_sent_at.get(symbol)
-
-cooldown_ok = (
-    previous_sent_at is None
-    or
-    (now - previous_sent_at).total_seconds()
-    >= PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
-)
-
-previous_watch_key = last_pre_breakout_key.get(symbol)
-
-if (
-    watch_key != previous_watch_key
-    and
-    cooldown_ok
-):
+                    if (
+                        watch_key != last_pre_breakout_key
+                        and
+                        cooldown_ok
                     ):
                         watch_message = build_pre_breakout_message(
                             pre_breakout,
@@ -1994,8 +1901,8 @@ if (
                         )
 
                         if send_telegram_alert(watch_message):
-                           last_pre_breakout_key[symbol] = watch_key
-last_pre_breakout_sent_at[symbol] = now
+                            last_pre_breakout_key = watch_key
+                            last_pre_breakout_sent_at = now
                             print(
                                 "🟡 PRE-BREAKOUT WATCH alert sent. "
                                 f"Resistance: ${pre_breakout['level']:,.2f}"
