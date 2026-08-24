@@ -1,6 +1,6 @@
 import threading
 import os
-from flask import Flask
+from flask import Flask  # type: ignore[import-not-found]
 from scoring_bot import run_engine
 
 app = Flask(__name__)

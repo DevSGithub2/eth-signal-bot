@@ -1627,6 +1627,17 @@ def evaluate_scoring(
         "breakout_level":
             breakout_level,
 
+        # Bullish-zone rejection detector output.
+        # This is a LONG invalidation signal only; it does not create a SHORT.
+        "bullish_rejection":
+            rejection.rejected,
+
+        "bullish_rejection_score":
+            rejection.score,
+
+        "bullish_rejection_reasons":
+            rejection.reasons,
+
         "long_blocked":
             long_blocked,
 
