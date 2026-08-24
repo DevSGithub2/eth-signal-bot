@@ -1902,9 +1902,7 @@ def run_engine():
                 if scanner_due:
                     try:
                         candidates = scan_market()
-                        scanner_message = format_scanner_log(candidates)
-                        print(scanner_message)
-                        send_telegram_alert(scanner_message)
+                        print(format_scanner_log(candidates))
                         last_market_scan_at = now
                     except Exception as scanner_error:
                         print(f"⚠️ Futures scanner error: {scanner_error}")
