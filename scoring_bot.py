@@ -26,62 +26,55 @@ OI_LIMIT = 100
 
 POLL_SECONDS = 3
 
-
-# ============================================================
-# BREAKOUT / REJECTION
-# ============================================================
-
+# Breakout / rejection detection
+# A breakout must hold above the detected resistance.
+# If price breaks above resistance but the CLOSED candle returns
+# below that level, the bot treats it as a failed hold / rejection.
 BREAKOUT_HOLD_TOLERANCE_PCT = 0.15
 
-
-# ============================================================
+# ------------------------------------------------------------
 # PRE-BREAKOUT WATCH
-# ============================================================
-
+# ------------------------------------------------------------
+# The normal engine waits for a CLOSED candle for confirmation.
+# This live watch warns when the CURRENT candle is approaching
+# resistance with bullish confluence, so a fast breakout is not
+# first reported only after the move has already happened.
 PRE_BREAKOUT_DISTANCE_PCT = 0.20
 PRE_BREAKOUT_MIN_CONFLUENCE = 4
 PRE_BREAKOUT_MIN_VOLUME_RATIO = 0.80
 PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS = 60
 
+# ------------------------------------------------------------
+# BREAKOUT -> RETEST CONFIRMATION
+# ------------------------------------------------------------
+# After a CLOSED candle breaks above resistance, the bot remembers
+# that breakout level and waits for a later candle to retest it.
+# Retest is confirmed only when price touches the breakout zone
+# and the CLOSED candle closes back above that level.
+# This is a WATCH/confirmation event only; it does NOT auto-trade.
+RETEST_ZONE_TOLERANCE_PCT = 0.15
+RETEST_MAX_CANDLES = 6
+RETEST_MIN_CLOSE_ABOVE_PCT = 0.02
 
-# ============================================================
-# PHASE 2 SCORING
-# ============================================================
-
+# Phase 2 = 8 factor system
 MIN_SCORE = 6
 MAX_SCORE = 8
-
-
-# ============================================================
-# RSI SETTINGS
-# ============================================================
-
-RSI_PERIOD_FAST = 14
-RSI_PERIOD_SLOW = 24
-
-# RSI is used as momentum confirmation.
-# It is NOT treated as a standalone trade trigger.
-RSI_BEARISH_LEVEL = 45.0
-RSI_STRONG_BEARISH_LEVEL = 40.0
-
-RSI_BULLISH_LEVEL = 55.0
-
 
 # ============================================================
 # BULLISH ZONE REJECTION DETECTOR
 # ============================================================
-
+# This is a LONG invalidation detector. It does NOT create a
+# SHORT signal by itself. A separate bearish setup must qualify
+# before the normal SHORT engine can alert.
 BULLISH_REJECTION_MIN_SCORE = 4
 BULLISH_REJECTION_VOLUME_MULTIPLIER = 1.30
 BULLISH_REJECTION_WICK_RATIO = 0.40
-
 
 @dataclass
 class RejectionResult:
     rejected: bool
     score: int
     reasons: list
-
 
 def detect_bullish_zone_rejection(
     candle,
@@ -93,92 +86,50 @@ def detect_bullish_zone_rejection(
     avg_volume,
     close_below_level=True,
 ):
-    """
-    Detect rejection of a bullish/resistance zone.
+    """Detect rejection of a bullish/resistance zone.
 
-    IMPORTANT:
-    This function only invalidates LONG.
-    It does NOT create a SHORT signal by itself.
+    IMPORTANT: this function only invalidates LONG. It does not
+    create a SHORT signal.
     """
-
     o = float(candle["open"])
     h = float(candle["high"])
     l = float(candle["low"])
     c = float(candle["close"])
 
     candle_range = max(h - l, 1e-9)
-
     upper_wick = h - max(o, c)
-
-    upper_wick_ratio = (
-        upper_wick / candle_range
-    )
+    upper_wick_ratio = upper_wick / candle_range
 
     score = 0
     reasons = []
 
-    touched_zone = (
-        h >= float(resistance)
-    )
-
+    touched_zone = h >= float(resistance)
     if touched_zone:
         score += 1
-        reasons.append(
-            "Bullish zone/resistance tested"
-        )
+        reasons.append("Bullish zone/resistance tested")
 
-    if (
-        touched_zone
-        and
-        upper_wick_ratio >= BULLISH_REJECTION_WICK_RATIO
-    ):
+    if touched_zone and upper_wick_ratio >= BULLISH_REJECTION_WICK_RATIO:
         score += 1
-        reasons.append(
-            "Large upper wick rejection"
-        )
+        reasons.append("Large upper wick rejection")
 
-    if (
-        touched_zone
-        and
-        close_below_level
-        and
-        c < float(resistance)
-    ):
+    if touched_zone and close_below_level and c < float(resistance):
         score += 2
-        reasons.append(
-            "Close back below bullish zone"
-        )
+        reasons.append("Close back below bullish zone")
 
-    if (
-        touched_zone
-        and
-        c < o
-    ):
+    if touched_zone and c < o:
         score += 1
-        reasons.append(
-            "Bearish rejection candle"
-        )
+        reasons.append("Bearish rejection candle")
 
-    if (
-        avg_volume > 0
-        and
-        volume >= avg_volume * BULLISH_REJECTION_VOLUME_MULTIPLIER
-    ):
+    if avg_volume > 0 and volume >= avg_volume * BULLISH_REJECTION_VOLUME_MULTIPLIER:
         score += 1
-        reasons.append(
-            "High rejection volume"
-        )
+        reasons.append("High rejection volume")
 
     if ema20 > ema50 > ema200:
         score += 1
-        reasons.append(
-            "Bullish EMA structure"
-        )
+        reasons.append("Bullish EMA structure")
 
     return RejectionResult(
-        rejected=(
-            score >= BULLISH_REJECTION_MIN_SCORE
-        ),
+        rejected=score >= BULLISH_REJECTION_MIN_SCORE,
         score=score,
         reasons=reasons,
     )
@@ -187,165 +138,66 @@ def detect_bullish_zone_rejection(
 # ============================================================
 # BINANCE FUTURES MARKET SCANNER
 # ============================================================
-
-MARKET_SCANNER_ENABLED = (
-    os.getenv(
-        "MARKET_SCANNER_ENABLED",
-        "true"
-    ).lower() == "true"
-)
-
-MARKET_SCANNER_MIN_VOLUME_USDT = float(
-    os.getenv(
-        "MARKET_SCANNER_MIN_VOLUME_USDT",
-        "20000000"
-    )
-)
-
-MARKET_SCANNER_TOP_N = int(
-    os.getenv(
-        "MARKET_SCANNER_TOP_N",
-        "10"
-    )
-)
-
-MARKET_SCANNER_INTERVAL_SECONDS = int(
-    os.getenv(
-        "MARKET_SCANNER_INTERVAL_SECONDS",
-        "60"
-    )
-)
-
-BINANCE_EXCHANGE_INFO_URL = (
-    "https://fapi.binance.com/fapi/v1/exchangeInfo"
-)
-
-BINANCE_24H_TICKER_URL = (
-    "https://fapi.binance.com/fapi/v1/ticker/24hr"
-)
-
+MARKET_SCANNER_ENABLED = os.getenv("MARKET_SCANNER_ENABLED", "true").lower() == "true"
+MARKET_SCANNER_MIN_VOLUME_USDT = float(os.getenv("MARKET_SCANNER_MIN_VOLUME_USDT", "20000000"))
+MARKET_SCANNER_TOP_N = int(os.getenv("MARKET_SCANNER_TOP_N", "10"))
+MARKET_SCANNER_INTERVAL_SECONDS = int(os.getenv("MARKET_SCANNER_INTERVAL_SECONDS", "60"))
+BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+BINANCE_24H_TICKER_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 
 def get_futures_symbols():
-
-    response = requests.get(
-        BINANCE_EXCHANGE_INFO_URL,
-        timeout=10
-    )
-
+    response = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=10)
     response.raise_for_status()
-
     data = response.json()
-
     return {
-        s["symbol"]
-        for s in data.get("symbols", [])
-        if (
-            s.get("contractType") == "PERPETUAL"
-            and
-            s.get("quoteAsset") == "USDT"
-            and
-            s.get("status") == "TRADING"
-        )
+        s["symbol"] for s in data.get("symbols", [])
+        if s.get("contractType") == "PERPETUAL"
+        and s.get("quoteAsset") == "USDT"
+        and s.get("status") == "TRADING"
     }
 
-
 def get_24h_tickers():
-
-    response = requests.get(
-        BINANCE_24H_TICKER_URL,
-        timeout=10
-    )
-
+    response = requests.get(BINANCE_24H_TICKER_URL, timeout=10)
     response.raise_for_status()
-
     data = response.json()
+    return data if isinstance(data, list) else []
 
-    return (
-        data
-        if isinstance(data, list)
-        else []
-    )
-
-
-def scan_market(
-    min_volume_usdt=MARKET_SCANNER_MIN_VOLUME_USDT,
-    top_n=MARKET_SCANNER_TOP_N
-):
-
+def scan_market(min_volume_usdt=MARKET_SCANNER_MIN_VOLUME_USDT, top_n=MARKET_SCANNER_TOP_N):
     symbols = get_futures_symbols()
     tickers = get_24h_tickers()
-
     candidates = []
-
     for t in tickers:
-
         symbol = t.get("symbol")
-
         if symbol not in symbols:
             continue
-
         try:
-
-            price = float(
-                t["lastPrice"]
-            )
-
-            change = float(
-                t["priceChangePercent"]
-            )
-
-            volume = float(
-                t["quoteVolume"]
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
+            price = float(t["lastPrice"])
+            change = float(t["priceChangePercent"])
+            volume = float(t["quoteVolume"])
+        except (KeyError, TypeError, ValueError):
             continue
-
         if volume < min_volume_usdt:
             continue
-
         candidates.append({
             "symbol": symbol,
             "price": price,
             "change_24h": change,
             "volume_24h": volume,
         })
-
-    candidates.sort(
-        key=lambda x: x["volume_24h"],
-        reverse=True
-    )
-
+    candidates.sort(key=lambda x: x["volume_24h"], reverse=True)
     return candidates[:top_n]
 
-
 def format_scanner_log(candidates):
-
     if not candidates:
-        return (
-            "No qualifying Futures candidates."
-        )
-
-    lines = [
-        "\n===== BINANCE FUTURES MARKET SCANNER ====="
-    ]
-
-    for i, coin in enumerate(
-        candidates,
-        1
-    ):
-
+        return "No qualifying Futures candidates."
+    lines = ["\n===== BINANCE FUTURES MARKET SCANNER ====="]
+    for i, coin in enumerate(candidates, 1):
         lines.append(
             f"{i:02d}. {coin['symbol']} | "
             f"24h {coin['change_24h']:+.2f}% | "
             f"Volume ${coin['volume_24h']/1_000_000:.2f}M | "
             f"Price ${coin['price']:,.8f}"
         )
-
     return "\n".join(lines)
 
 
@@ -354,10 +206,7 @@ def format_scanner_log(candidates):
 # ============================================================
 
 def utc_now():
-
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
 # ============================================================
@@ -366,16 +215,8 @@ def utc_now():
 
 def send_telegram_alert(message: str):
 
-    if (
-        not TELEGRAM_BOT_TOKEN
-        or
-        not TELEGRAM_CHANNEL_ID
-    ):
-
-        print(
-            "Telegram credentials are missing."
-        )
-
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        print("Telegram credentials are missing.")
         return False
 
     url = (
@@ -402,25 +243,15 @@ def send_telegram_alert(message: str):
 
         result = response.json()
 
-        if not result.get(
-            "ok",
-            False
-        ):
-
-            print(
-                f"Telegram API error: {result}"
-            )
-
+        if not result.get("ok", False):
+            print(f"Telegram API error: {result}")
             return False
 
         return True
 
     except requests.RequestException as e:
 
-        print(
-            f"Telegram request error: {e}"
-        )
-
+        print(f"Telegram request error: {e}")
         return False
 
 
@@ -452,10 +283,8 @@ def fetch_klines(
 
     if (
         not isinstance(data, list)
-        or
-        len(data) < 220
+        or len(data) < 220
     ):
-
         raise ValueError(
             "Insufficient kline data received."
         )
@@ -541,19 +370,12 @@ def fetch_open_interest(
 
         if (
             not isinstance(data, list)
-            or
-            len(data) < 3
+            or len(data) < 3
         ):
-
-            print(
-                "Insufficient OI data."
-            )
-
+            print("Insufficient OI data.")
             return pd.DataFrame()
 
-        df_oi = pd.DataFrame(
-            data
-        )
+        df_oi = pd.DataFrame(data)
 
         required_columns = [
             "timestamp",
@@ -564,11 +386,7 @@ def fetch_open_interest(
         for col in required_columns:
 
             if col not in df_oi.columns:
-
-                print(
-                    f"Missing OI column: {col}"
-                )
-
+                print(f"Missing OI column: {col}")
                 return pd.DataFrame()
 
         df_oi["timestamp"] = pd.to_datetime(
@@ -603,24 +421,21 @@ def fetch_open_interest(
 
     except Exception as e:
 
-        print(
-            f"OI fetch error: {e}"
-        )
-
+        print(f"OI fetch error: {e}")
         return pd.DataFrame()
 
 
 # ============================================================
-# INDICATORS
+# INDICATORS — PHASE 2
 # ============================================================
 
 def calculate_indicators(df):
 
     df = df.copy()
 
-    # ========================================================
+    # --------------------------------------------------------
     # EMA 20 / 50 / 200
-    # ========================================================
+    # --------------------------------------------------------
 
     df["ema_20"] = (
         df["close"]
@@ -649,9 +464,9 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # ========================================================
-    # VOLUME
-    # ========================================================
+    # --------------------------------------------------------
+    # Volume
+    # --------------------------------------------------------
 
     df["vol_sma_20"] = (
         df["volume"]
@@ -665,9 +480,9 @@ def calculate_indicators(df):
         df["vol_sma_20"]
     )
 
-    # ========================================================
-    # TAKER DELTA
-    # ========================================================
+    # --------------------------------------------------------
+    # Taker Delta
+    # --------------------------------------------------------
 
     df["taker_sell_base"] = (
         df["volume"]
@@ -684,19 +499,14 @@ def calculate_indicators(df):
     df["delta_pct"] = (
         df["delta"]
         /
-        df["volume"].replace(
-            0,
-            np.nan
-        )
+        df["volume"].replace(0, np.nan)
     ) * 100
 
-    # ========================================================
+    # --------------------------------------------------------
     # CVD
-    # ========================================================
+    # --------------------------------------------------------
 
-    df["cvd"] = (
-        df["delta"].cumsum()
-    )
+    df["cvd"] = df["delta"].cumsum()
 
     df["cvd_change"] = (
         df["cvd"]
@@ -704,9 +514,9 @@ def calculate_indicators(df):
         df["cvd"].shift(1)
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # MACD 12 / 26 / 9
-    # ========================================================
+    # --------------------------------------------------------
 
     ema_12 = (
         df["close"]
@@ -727,9 +537,7 @@ def calculate_indicators(df):
     )
 
     df["macd"] = (
-        ema_12
-        -
-        ema_26
+        ema_12 - ema_26
     )
 
     df["macd_signal"] = (
@@ -747,132 +555,35 @@ def calculate_indicators(df):
         df["macd_signal"]
     )
 
-    # ========================================================
-    # RSI 14
-    # ========================================================
-
-    delta_price = (
-        df["close"].diff()
-    )
-
-    gain = (
-        delta_price.clip(lower=0)
-    )
-
-    loss = (
-        -delta_price.clip(upper=0)
-    )
-
-    avg_gain = (
-        gain.ewm(
-            alpha=1 / RSI_PERIOD_FAST,
-            adjust=False
-        )
-        .mean()
-    )
-
-    avg_loss = (
-        loss.ewm(
-            alpha=1 / RSI_PERIOD_FAST,
-            adjust=False
-        )
-        .mean()
-    )
-
-    rs = (
-        avg_gain
-        /
-        avg_loss.replace(
-            0,
-            np.nan
-        )
-    )
-
-    df["rsi_14"] = (
-        100
-        -
-        (
-            100
-            /
-            (1 + rs)
-        )
-    )
-
-    # ========================================================
-    # RSI 24
-    # ========================================================
-
-    avg_gain_24 = (
-        gain.ewm(
-            alpha=1 / RSI_PERIOD_SLOW,
-            adjust=False
-        )
-        .mean()
-    )
-
-    avg_loss_24 = (
-        loss.ewm(
-            alpha=1 / RSI_PERIOD_SLOW,
-            adjust=False
-        )
-        .mean()
-    )
-
-    rs_24 = (
-        avg_gain_24
-        /
-        avg_loss_24.replace(
-            0,
-            np.nan
-        )
-    )
-
-    df["rsi_24"] = (
-        100
-        -
-        (
-            100
-            /
-            (1 + rs_24)
-        )
-    )
-
-    # ========================================================
-    # CANDLE STRUCTURE
-    # ========================================================
+    # --------------------------------------------------------
+    # Candle structure
+    # --------------------------------------------------------
 
     df["body"] = (
-        (
-            df["close"]
-            -
-            df["open"]
-        ).abs()
+        (df["close"] - df["open"])
+        .abs()
     )
 
     df["range"] = (
-        df["high"]
-        -
-        df["low"]
+        df["high"] - df["low"]
     )
 
     df["upper_wick"] = (
         df["high"]
         -
-        df[["open", "close"]]
-        .max(axis=1)
+        df[["open", "close"]].max(axis=1)
     )
 
     df["lower_wick"] = (
-        df[["open", "close"]]
-        .min(axis=1)
+        df[["open", "close"]].min(axis=1)
         -
         df["low"]
     )
 
-    # ========================================================
-    # RECENT HIGH / LOW
-    # EXCLUDES CURRENT CANDLE
-    # ========================================================
+    # --------------------------------------------------------
+    # Recent highs / lows
+    # Excludes current candle
+    # --------------------------------------------------------
 
     df["recent_high"] = (
         df["high"]
@@ -910,22 +621,16 @@ def get_aligned_oi(
     )
 
     target = pd.DataFrame({
-        "candle_time": [
-            candle_time
-        ]
+        "candle_time": [candle_time]
     })
 
     aligned = pd.merge_asof(
-        target.sort_values(
-            "candle_time"
-        ),
+        target.sort_values("candle_time"),
         oi,
         left_on="candle_time",
         right_on="timestamp",
         direction="nearest",
-        tolerance=pd.Timedelta(
-            minutes=2
-        )
+        tolerance=pd.Timedelta(minutes=2)
     )
 
     if aligned.empty:
@@ -933,9 +638,7 @@ def get_aligned_oi(
 
     row = aligned.iloc[0]
 
-    if pd.isna(
-        row["timestamp"]
-    ):
+    if pd.isna(row["timestamp"]):
         return None
 
     return row
@@ -969,104 +672,71 @@ def calculate_oi_state(
     if current is None:
         return result
 
-    current_time = (
-        current["timestamp"]
-    )
+    current_time = current["timestamp"]
 
     current_oi = float(
         current["sumOpenInterest"]
     )
 
     previous_rows = df_oi[
-        df_oi["timestamp"]
-        <
-        current_time
+        df_oi["timestamp"] < current_time
     ]
 
     if previous_rows.empty:
         return result
 
     previous_oi = float(
-        previous_rows
-        .iloc[-1]["sumOpenInterest"]
+        previous_rows.iloc[-1]["sumOpenInterest"]
     )
 
     if previous_oi == 0:
         return result
 
     oi_change_pct = (
-        (
-            current_oi
-            -
-            previous_oi
-        )
+        (current_oi - previous_oi)
         /
         previous_oi
     ) * 100
 
     price_change_pct = (
-        (
-            close
-            -
-            previous_close
-        )
+        (close - previous_close)
         /
         previous_close
     ) * 100
 
-    result["change_pct"] = (
-        oi_change_pct
-    )
-
-    result["oi_time"] = (
-        current_time
-    )
+    result["change_pct"] = oi_change_pct
+    result["oi_time"] = current_time
 
     if (
         price_change_pct > 0
         and
         oi_change_pct > 0
     ):
-
-        result["status"] = (
-            "Long Buildup"
-        )
+        result["status"] = "Long Buildup"
 
     elif (
         price_change_pct < 0
         and
         oi_change_pct > 0
     ):
-
-        result["status"] = (
-            "Short Buildup"
-        )
+        result["status"] = "Short Buildup"
 
     elif (
         price_change_pct > 0
         and
         oi_change_pct < 0
     ):
-
-        result["status"] = (
-            "Short Covering"
-        )
+        result["status"] = "Short Covering"
 
     elif (
         price_change_pct < 0
         and
         oi_change_pct < 0
     ):
-
-        result["status"] = (
-            "Long Unwinding"
-        )
+        result["status"] = "Long Unwinding"
 
     else:
-
-        result["status"] = (
-            "Neutral"
-        )
+        result["status"] = "Neutral"
 
     return result
 
@@ -1079,25 +749,12 @@ def detect_liquidity(df):
 
     latest = df.iloc[-2]
 
-    recent_high = (
-        latest["recent_high"]
-    )
+    recent_high = latest["recent_high"]
+    recent_low = latest["recent_low"]
 
-    recent_low = (
-        latest["recent_low"]
-    )
-
-    high = float(
-        latest["high"]
-    )
-
-    low = float(
-        latest["low"]
-    )
-
-    close = float(
-        latest["close"]
-    )
+    high = float(latest["high"])
+    low = float(latest["low"])
+    close = float(latest["close"])
 
     result = {
         "status": "Neutral",
@@ -1106,16 +763,13 @@ def detect_liquidity(df):
         "level": np.nan
     }
 
-    if (
-        pd.isna(recent_high)
-        or
-        pd.isna(recent_low)
-    ):
+    if pd.isna(recent_high) or pd.isna(recent_low):
         return result
 
-    # ========================================================
-    # BEARISH LIQUIDITY SWEEP
-    # ========================================================
+    # --------------------------------------------------------
+    # Bearish liquidity sweep
+    # Price takes previous high but closes back below it
+    # --------------------------------------------------------
 
     if (
         high > recent_high
@@ -1123,18 +777,16 @@ def detect_liquidity(df):
         close < recent_high
     ):
 
-        result["status"] = (
-            "Bearish Liquidity Sweep"
-        )
-
+        result["status"] = "Bearish Liquidity Sweep"
         result["short"] = True
         result["level"] = recent_high
 
         return result
 
-    # ========================================================
-    # BULLISH LIQUIDITY SWEEP
-    # ========================================================
+    # --------------------------------------------------------
+    # Bullish liquidity sweep
+    # Price takes previous low but closes back above it
+    # --------------------------------------------------------
 
     if (
         low < recent_low
@@ -1142,34 +794,25 @@ def detect_liquidity(df):
         close > recent_low
     ):
 
-        result["status"] = (
-            "Bullish Liquidity Sweep"
-        )
-
+        result["status"] = "Bullish Liquidity Sweep"
         result["long"] = True
         result["level"] = recent_low
 
         return result
 
-    # ========================================================
-    # BREAKOUT CONTEXT
-    # ========================================================
+    # --------------------------------------------------------
+    # Breakout context
+    # --------------------------------------------------------
 
     if close > recent_high:
 
-        result["status"] = (
-            "High Liquidity Broken"
-        )
-
+        result["status"] = "High Liquidity Broken"
         result["long"] = True
         result["level"] = recent_high
 
     elif close < recent_low:
 
-        result["status"] = (
-            "Low Liquidity Broken"
-        )
-
+        result["status"] = "Low Liquidity Broken"
         result["short"] = True
         result["level"] = recent_low
 
@@ -1177,201 +820,273 @@ def detect_liquidity(df):
 
 
 # ============================================================
-# BREAKOUT HOLD / REJECTION
+# BREAKOUT HOLD / REJECTION DETECTION
 # ============================================================
 
 def detect_breakout_rejection(df):
+    """
+    Detect two important 5M price-action events:
+
+    1) Failed breakout / failed hold:
+       A previous closed candle closes above its prior resistance,
+       but the latest closed candle closes back below that level.
+
+    2) Rejection at resistance:
+       Price trades above the latest resistance, leaves an upper wick,
+       and closes back below the resistance.
+
+    This is intentionally a price-action flag, not a separate scoring
+    factor, so the existing 8-factor score remains 0-8.
+    """
 
     latest = df.iloc[-2]
     previous = df.iloc[-3]
 
     result = {
-        "status": (
-            "No clear breakout / hold event"
-        ),
+        "status": "No clear breakout rejection",
         "short": False,
         "long_blocked": False,
         "level": np.nan,
         "failed_hold": False
     }
 
-    latest_level = (
-        latest["recent_high"]
-    )
-
-    previous_level = (
-        previous["recent_high"]
-    )
+    latest_level = latest["recent_high"]
+    previous_level = previous["recent_high"]
 
     if pd.isna(latest_level):
         return result
 
-    level = float(
-        latest_level
-    )
-
-    high = float(
-        latest["high"]
-    )
-
-    low = float(
-        latest["low"]
-    )
-
-    close = float(
-        latest["close"]
-    )
-
-    body = float(
-        latest["body"]
-    )
-
-    candle_range = float(
-        latest["range"]
-    )
-
-    upper_wick = float(
-        latest["upper_wick"]
-    )
+    level = float(latest_level)
+    high = float(latest["high"])
+    close = float(latest["close"])
+    body = float(latest["body"])
+    candle_range = float(latest["range"])
+    upper_wick = float(latest["upper_wick"])
 
     if candle_range <= 0:
         return result
 
-    # ========================================================
-    # BULLISH BREAKOUT CONFIRMED
-    # ========================================================
+    # --------------------------------------------------------
+    # Strongest case: breakout happened, but the next candle
+    # could not hold above the breakout level.
+    # --------------------------------------------------------
+    if not pd.isna(previous_level):
+        previous_level = float(previous_level)
+        previous_close = float(previous["close"])
 
-    if close > level:
+        previous_broke_out = previous_close > previous_level
+        latest_failed_hold = close < previous_level
 
-        result["status"] = (
-            "Bullish Breakout Confirmed"
-        )
-
-        result["level"] = level
-
-        return result
-
-    # ========================================================
-    # HOLD / RETEST AFTER PREVIOUS BREAKOUT
-    # ========================================================
-
-    if not pd.isna(
-        previous_level
-    ):
-
-        previous_level = float(
-            previous_level
-        )
-
-        previous_close = float(
-            previous["close"]
-        )
-
-        previous_broke_out = (
-            previous_close
-            >
-            previous_level
-        )
-
-        if previous_broke_out:
-
-            if close < previous_level:
-
-                result["status"] = (
-                    "Bearish Breakout Failure / Hold Lost"
-                )
-
-                result["short"] = True
-                result["long_blocked"] = True
-                result["level"] = (
-                    previous_level
-                )
-
-                result["failed_hold"] = True
-
-                return result
-
-            if low <= previous_level:
-
-                result["status"] = (
-                    "Bullish Breakout Retest / HOLD Confirmed"
-                )
-
-            else:
-
-                result["status"] = (
-                    "Bullish Breakout HOLD Confirmed"
-                )
-
-            result["level"] = (
-                previous_level
-            )
-
+        if previous_broke_out and latest_failed_hold:
+            result["status"] = "Bearish Breakout Failure / Hold Lost"
+            result["short"] = True
+            result["long_blocked"] = True
+            result["level"] = previous_level
+            result["failed_hold"] = True
             return result
 
-    # ========================================================
-    # REJECTION WITHOUT CONFIRMED PRIOR BREAKOUT
-    # ========================================================
-
-    rejection_close = (
-        close < level
-    )
-
-    took_level = (
-        high > level
-    )
-
+    # --------------------------------------------------------
+    # Rejection at resistance even when there was no prior
+    # candle close above the level.
+    # --------------------------------------------------------
+    rejection_close = close < level
+    took_level = high > level
     wick_rejection = (
-        upper_wick
-        >=
-        max(
-            body * 1.2,
-            candle_range * 0.20
-        )
+        upper_wick >= max(body * 1.2, candle_range * 0.20)
     )
 
-    if (
-        took_level
-        and
-        rejection_close
-        and
-        wick_rejection
-    ):
-
-        result["status"] = (
-            "Bearish Resistance Rejection / Hold Failed"
-        )
-
+    if took_level and rejection_close and wick_rejection:
+        result["status"] = "Bearish Resistance Rejection / Hold Failed"
         result["short"] = True
         result["level"] = level
 
-        if (
-            close
-            <
-            level
-            *
-            (
-                1
-                -
-                BREAKOUT_HOLD_TOLERANCE_PCT
-                /
-                100
-            )
-        ):
-
+        # A meaningful close back below resistance means a LONG
+        # should not be generated from this candle.
+        if close < level * (1 - BREAKOUT_HOLD_TOLERANCE_PCT / 100):
             result["long_blocked"] = True
 
     return result
 
 
 # ============================================================
-# PRE-BREAKOUT WATCH
+# BULLISH BREAKOUT -> RETEST CONFIRMATION
+# ============================================================
+
+def detect_bullish_breakout_retest(
+    df,
+    pending_retest_level=None,
+    pending_retest_candle_time=None,
+):
+    """
+    Stateful bullish breakout/retest detector.
+
+    Stage 1: a CLOSED candle closes above the resistance that
+             existed before that candle.
+    Stage 2: remember that exact breakout level.
+    Stage 3: wait for a later CLOSED candle to return to the level.
+    Stage 4: if the level is tested and the candle closes back above
+             it, report RETEST_CONFIRMED.
+
+    If a CLOSED candle moves meaningfully below the level, the
+    breakout is invalidated and RETEST_FAILED is returned.
+
+    This function never creates an automatic trade.
+    """
+    latest = df.iloc[-2]
+
+    latest_time = latest["open_time"]
+    latest_close = float(latest["close"])
+    latest_high = float(latest["high"])
+    latest_low = float(latest["low"])
+    latest_open = float(latest["open"])
+
+    result = {
+        "status": "NO_RETEST_EVENT",
+        "breakout": False,
+        "retest_confirmed": False,
+        "retest_failed": False,
+        "level": pending_retest_level,
+        "candle_time": latest_time,
+        "reason": "",
+    }
+
+    # --------------------------------------------------------
+    # Stage 1: detect a NEW CLOSED-CANDLE bullish breakout.
+    # --------------------------------------------------------
+    recent_resistance = latest["recent_high"]
+
+    if pending_retest_level is None and not pd.isna(recent_resistance):
+        resistance = float(recent_resistance)
+
+        bullish_breakout = (
+            latest_close > resistance
+            and latest_close > latest_open
+        )
+
+        if bullish_breakout:
+            result["status"] = "BULLISH_BREAKOUT_CONFIRMED"
+            result["breakout"] = True
+            result["level"] = resistance
+            result["reason"] = (
+                f"Closed candle broke above ${resistance:,.2f}"
+            )
+            return result
+
+    if pending_retest_level is None:
+        return result
+
+    level = float(pending_retest_level)
+
+    # Never use the breakout candle itself as its own retest.
+    if (
+        pending_retest_candle_time is not None
+        and latest_time <= pending_retest_candle_time
+    ):
+        result["status"] = "WAITING_FOR_RETEST"
+        result["reason"] = f"Waiting for retest of ${level:,.2f}"
+        return result
+
+    # --------------------------------------------------------
+    # Retest zone. A small tolerance avoids requiring an exact tick.
+    # --------------------------------------------------------
+    zone_upper = level * (1 + RETEST_ZONE_TOLERANCE_PCT / 100)
+    zone_lower = level * (1 - RETEST_ZONE_TOLERANCE_PCT / 100)
+
+    # A later candle must actually trade back into the breakout zone.
+    retest_touched = (
+        latest_low <= zone_upper
+        and latest_high >= zone_lower
+    )
+
+    # --------------------------------------------------------
+    # Retest failed: closed meaningfully below the breakout zone.
+    # --------------------------------------------------------
+    if latest_close < zone_lower:
+        result["status"] = "RETEST_FAILED"
+        result["retest_failed"] = True
+        result["level"] = level
+        result["reason"] = (
+            f"Closed below breakout level ${level:,.2f}"
+        )
+        return result
+
+    # --------------------------------------------------------
+    # Retest confirmed: level was tested and candle closed back above.
+    # --------------------------------------------------------
+    close_buffer = level * (RETEST_MIN_CLOSE_ABOVE_PCT / 100)
+    close_above_level = latest_close >= level + close_buffer
+
+    if retest_touched and close_above_level:
+        result["status"] = "RETEST_CONFIRMED"
+        result["retest_confirmed"] = True
+        result["level"] = level
+        result["reason"] = (
+            f"Price retested ${level:,.2f} and closed back above the level"
+        )
+        return result
+
+    result["status"] = "WAITING_FOR_RETEST"
+    result["level"] = level
+    result["reason"] = f"Waiting for price to retest ${level:,.2f} and hold"
+    return result
+
+
+# ============================================================
+# RETEST TELEGRAM MESSAGE
+# ============================================================
+
+def build_retest_message(retest, generated_at):
+    level = retest["level"]
+
+    if retest["status"] == "RETEST_CONFIRMED":
+        return (
+            f"🟢 *RETEST CONFIRMED*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *Pair:* `{SYMBOL}`\n"
+            f"⏱ *Interval:* `{INTERVAL}`\n"
+            f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+            f"🎯 *Breakout Level:* `${level:,.2f}`\n"
+            f"🔄 *Retest:* `CONFIRMED`\n"
+            f"✅ *Level Held After Breakout*\n"
+            f"📈 *LONG SETUP:* `READY`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ *WATCH ONLY — NOT AN AUTO TRADE*\n"
+            f"Human chart verification is still required."
+        )
+
+    if retest["status"] == "RETEST_FAILED":
+        return (
+            f"🔴 *RETEST FAILED*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *Pair:* `{SYMBOL}`\n"
+            f"⏱ *Interval:* `{INTERVAL}`\n"
+            f"🎯 *Breakout Level:* `${level:,.2f}`\n"
+            f"❌ *Level Lost After Breakout*\n"
+            f"🚫 *LONG SETUP:* `INVALIDATED`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Wait for a new breakout setup."
+        )
+
+    return None
+
+
+# ============================================================
+# PRE-BREAKOUT WATCH — LIVE FORMING CANDLE
 # ============================================================
 
 def detect_pre_breakout_watch(df):
+    """
+    Early warning only — NOT a confirmed LONG signal.
 
+    The normal engine evaluates the last CLOSED candle. This
+    function additionally looks at the CURRENT forming candle and
+    warns when price is close to the resistance defined by the last
+    closed candle's recent_high.
+
+    Confirmation still requires a closed candle above resistance
+    and/or a valid hold/retest. The watch never authorizes a trade.
+    """
     if len(df) < 25:
-
         return {
             "active": False,
             "status": "Insufficient data",
@@ -1384,194 +1099,103 @@ def detect_pre_breakout_watch(df):
     closed = df.iloc[-2]
     live = df.iloc[-1]
 
-    live_price = float(
-        live["close"]
-    )
+    live_price = float(live["close"])
 
-    local_resistance = float(
-        df["high"].iloc[-9:-1].max()
-    )
+    # Use BOTH a short local resistance and the broader 20-candle
+    # resistance. For fast moves, the immediate local level is often
+    # the one that matters first (for example 2431/2432), while the
+    # 20-candle high can be much farther away.
+    local_resistance = float(df["high"].iloc[-9:-1].max())
+    broad_resistance = closed["recent_high"]
 
-    broad_resistance = (
-        closed["recent_high"]
-    )
+    resistance_candidates = [local_resistance]
+    if not pd.isna(broad_resistance):
+        resistance_candidates.append(float(broad_resistance))
 
-    resistance_candidates = [
-        local_resistance
-    ]
-
-    if not pd.isna(
-        broad_resistance
-    ):
-
-        resistance_candidates.append(
-            float(broad_resistance)
-        )
-
+    # Pick the nearest resistance ABOVE the current live price.
     above_price = [
-        level
-        for level
-        in resistance_candidates
+        level for level in resistance_candidates
         if level > live_price
     ]
 
     if not above_price:
-
         return {
             "active": False,
-            "status": (
-                "No nearby resistance detected"
-            ),
+            "status": "No nearby resistance detected",
             "level": np.nan,
             "distance_pct": np.nan,
             "confluence": 0,
             "reasons": []
         }
 
-    resistance = min(
-        above_price
-    )
-
-    distance_pct = (
-        (
-            resistance
-            -
-            live_price
-        )
-        /
-        resistance
-    ) * 100
+    resistance = min(above_price)
+    distance_pct = ((resistance - live_price) / resistance) * 100
 
     near_resistance = (
         distance_pct >= 0
         and
-        distance_pct
-        <= PRE_BREAKOUT_DISTANCE_PCT
+        distance_pct <= PRE_BREAKOUT_DISTANCE_PCT
     )
 
-    if (
-        float(live["high"])
-        >
-        resistance
-    ):
-
+    # If the CURRENT candle has already traded through this level,
+    # it is no longer a pre-breakout state.
+    if float(live["high"]) > resistance:
         near_resistance = False
 
     reasons = []
     confluence = 0
 
     ema_bullish = (
-        float(closed["ema_20"])
-        >
-        float(closed["ema_50"])
+        float(closed["ema_20"]) > float(closed["ema_50"])
         and
-        float(closed["ema_50"])
-        >
-        float(closed["ema_200"])
+        float(closed["ema_50"]) > float(closed["ema_200"])
     )
 
     if ema_bullish:
-
         confluence += 1
+        reasons.append("EMA 20 > 50 > 200")
 
-        reasons.append(
-            "EMA 20 > 50 > 200"
-        )
+    if float(closed["close"]) > float(closed["ema_20"]):
+        confluence += 1
+        reasons.append("Last close above EMA20")
+
+    volume_ratio = float(closed["volume_ratio"])
+    if not np.isnan(volume_ratio) and volume_ratio >= PRE_BREAKOUT_MIN_VOLUME_RATIO:
+        confluence += 1
+        reasons.append(f"Volume {volume_ratio:.2f}x average")
 
     if (
-        float(closed["close"])
-        >
-        float(closed["ema_20"])
-    ):
-
-        confluence += 1
-
-        reasons.append(
-            "Last close above EMA20"
-        )
-
-    volume_ratio = float(
-        closed["volume_ratio"]
-    )
-
-    if (
-        not np.isnan(volume_ratio)
+        float(closed["macd"]) > float(closed["macd_signal"])
         and
-        volume_ratio
-        >= PRE_BREAKOUT_MIN_VOLUME_RATIO
+        float(closed["macd_hist"]) > 0
     ):
-
         confluence += 1
-
-        reasons.append(
-            f"Volume {volume_ratio:.2f}x average"
-        )
+        reasons.append("MACD bullish")
 
     if (
-        float(closed["macd"])
-        >
-        float(closed["macd_signal"])
+        float(closed["delta"]) > 0
         and
-        float(closed["macd_hist"])
-        > 0
+        float(closed["cvd_change"]) > 0
     ):
-
         confluence += 1
+        reasons.append("Positive Delta + CVD")
 
-        reasons.append(
-            "MACD bullish"
-        )
-
-    if (
-        float(closed["delta"])
-        > 0
-        and
-        float(closed["cvd_change"])
-        > 0
-    ):
-
+    if float(closed["close"]) > float(closed["open"]):
         confluence += 1
-
-        reasons.append(
-            "Positive Delta + CVD"
-        )
-
-    if (
-        float(closed["close"])
-        >
-        float(closed["open"])
-    ):
-
-        confluence += 1
-
-        reasons.append(
-            "Last candle bullish"
-        )
+        reasons.append("Last candle bullish")
 
     active = (
         near_resistance
         and
-        confluence
-        >= PRE_BREAKOUT_MIN_CONFLUENCE
+        confluence >= PRE_BREAKOUT_MIN_CONFLUENCE
     )
 
     if active:
-
-        status = (
-            "PRE-BREAKOUT WATCH — resistance approaching"
-        )
-
+        status = "PRE-BREAKOUT WATCH — resistance approaching"
     elif near_resistance:
-
-        status = (
-            "Near resistance — weak confluence"
-        )
-
+        status = "Near resistance — weak confluence"
     else:
-
-        status = (
-            "No pre-breakout setup"
-        )
+        status = "No pre-breakout setup"
 
     return {
         "active": active,
@@ -1583,11 +1207,7 @@ def detect_pre_breakout_watch(df):
     }
 
 
-def build_pre_breakout_message(
-    watch,
-    generated_at
-):
-
+def build_pre_breakout_message(watch, generated_at):
     level = watch["level"]
     distance = watch["distance_pct"]
     reasons = watch["reasons"]
@@ -1597,60 +1217,34 @@ def build_pre_breakout_message(
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *Pair:* `{SYMBOL}`\n"
         f"⏱ *Interval:* `{INTERVAL}`\n"
-        f"⚡ *Detected:* "
-        f"`{generated_at.strftime('%H:%M:%S UTC')}`\n"
-        f"🎯 *Resistance:* "
-        f"`${level:,.2f}`\n"
-        f"📏 *Distance:* "
-        f"`{distance:.2f}%`\n"
-        f"🔥 *Bullish Confluence:* "
-        f"`{watch['confluence']}`\n"
+        f"⚡ *Detected:* `{generated_at.strftime('%H:%M:%S UTC')}`\n"
+        f"🎯 *Resistance:* `${level:,.2f}`\n"
+        f"📏 *Distance:* `{distance:.2f}%`\n"
+        f"🔥 *Bullish Confluence:* `{watch['confluence']}`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 *Why it is being watched:*\n"
-        +
-        "\n".join(
-            f"✅ {r}"
-            for r in reasons
-        )
-        +
-        "\n━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n".join(f"✅ {r}" for r in reasons)
+        + "\n━━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ *WATCH ONLY — NOT A LONG SIGNAL*\n"
-        f"Wait for breakout close above "
-        f"`${level:,.2f}` and hold/retest confirmation."
+        f"Wait for breakout close above `${level:,.2f}` and hold/retest confirmation."
     )
 
 
 # ============================================================
-# ABSORPTION / TRAP
+# ABSORPTION / TRAP DETECTION
 # ============================================================
 
 def detect_absorption(df):
 
     latest = df.iloc[-2]
 
-    body = float(
-        latest["body"]
-    )
+    body = float(latest["body"])
+    candle_range = float(latest["range"])
+    volume_ratio = float(latest["volume_ratio"])
+    delta_pct = float(latest["delta_pct"])
 
-    candle_range = float(
-        latest["range"]
-    )
-
-    volume_ratio = float(
-        latest["volume_ratio"]
-    )
-
-    delta_pct = float(
-        latest["delta_pct"]
-    )
-
-    upper_wick = float(
-        latest["upper_wick"]
-    )
-
-    lower_wick = float(
-        latest["lower_wick"]
-    )
+    upper_wick = float(latest["upper_wick"])
+    lower_wick = float(latest["lower_wick"])
 
     result = {
         "status": "Neutral",
@@ -1661,13 +1255,14 @@ def detect_absorption(df):
     if candle_range <= 0:
         return result
 
-    body_ratio = (
-        body / candle_range
-    )
+    body_ratio = body / candle_range
 
-    # ========================================================
-    # BULLISH ABSORPTION
-    # ========================================================
+    # --------------------------------------------------------
+    # Bullish absorption
+    #
+    # Strong negative delta / selling pressure
+    # but price rejects lows and closes relatively strongly
+    # --------------------------------------------------------
 
     if (
         delta_pct < -5
@@ -1679,15 +1274,15 @@ def detect_absorption(df):
         body_ratio < 0.60
     ):
 
-        result["status"] = (
-            "Bullish Absorption"
-        )
-
+        result["status"] = "Bullish Absorption"
         result["long"] = True
 
-    # ========================================================
-    # BEARISH ABSORPTION
-    # ========================================================
+    # --------------------------------------------------------
+    # Bearish absorption
+    #
+    # Strong positive delta / buying pressure
+    # but price rejects highs
+    # --------------------------------------------------------
 
     elif (
         delta_pct > 5
@@ -1699,17 +1294,14 @@ def detect_absorption(df):
         body_ratio < 0.60
     ):
 
-        result["status"] = (
-            "Bearish Absorption"
-        )
-
+        result["status"] = "Bearish Absorption"
         result["short"] = True
 
     return result
 
 
 # ============================================================
-# SCORING
+# SCORING — PHASE 2
 # ============================================================
 
 def evaluate_scoring(
@@ -1720,81 +1312,30 @@ def evaluate_scoring(
     latest = df.iloc[-2]
     previous = df.iloc[-3]
 
-    candle_time = (
-        latest["open_time"]
-    )
+    candle_time = latest["open_time"]
+    candle_close_time = latest["close_time"]
 
-    candle_close_time = (
-        latest["close_time"]
-    )
+    close = float(latest["close"])
+    previous_close = float(previous["close"])
 
-    close = float(
-        latest["close"]
-    )
+    ema_20 = float(latest["ema_20"])
+    ema_50 = float(latest["ema_50"])
+    ema_200 = float(latest["ema_200"])
 
-    previous_close = float(
-        previous["close"]
-    )
+    volume = float(latest["volume"])
+    volume_avg = float(latest["vol_sma_20"])
+    volume_ratio = float(latest["volume_ratio"])
 
-    ema_20 = float(
-        latest["ema_20"]
-    )
+    delta = float(latest["delta"])
+    delta_pct = float(latest["delta_pct"])
 
-    ema_50 = float(
-        latest["ema_50"]
-    )
+    cvd_change = float(
+        latest["cvd_change"]
+    ) if not pd.isna(latest["cvd_change"]) else 0
 
-    ema_200 = float(
-        latest["ema_200"]
-    )
-
-    volume = float(
-        latest["volume"]
-    )
-
-    volume_avg = float(
-        latest["vol_sma_20"]
-    )
-
-    volume_ratio = float(
-        latest["volume_ratio"]
-    )
-
-    delta = float(
-        latest["delta"]
-    )
-
-    delta_pct = float(
-        latest["delta_pct"]
-    )
-
-    cvd_change = (
-        float(latest["cvd_change"])
-        if not pd.isna(
-            latest["cvd_change"]
-        )
-        else 0
-    )
-
-    macd = float(
-        latest["macd"]
-    )
-
-    macd_signal = float(
-        latest["macd_signal"]
-    )
-
-    macd_hist = float(
-        latest["macd_hist"]
-    )
-
-    rsi_14 = float(
-        latest["rsi_14"]
-    )
-
-    rsi_24 = float(
-        latest["rsi_24"]
-    )
+    macd = float(latest["macd"])
+    macd_signal = float(latest["macd_signal"])
+    macd_hist = float(latest["macd_hist"])
 
     long_score = 0
     short_score = 0
@@ -1803,12 +1344,8 @@ def evaluate_scoring(
     short_reasons = []
 
     # ========================================================
-    # FACTOR 1 — EMA STRUCTURE / PRESSURE
+    # FACTOR 1 — EMA 20 / 50 / 200
     # ========================================================
-
-    # --------------------------------------------------------
-    # Bullish remains strict.
-    # --------------------------------------------------------
 
     bullish_ema = (
         ema_20 > ema_50
@@ -1816,23 +1353,7 @@ def evaluate_scoring(
         ema_50 > ema_200
     )
 
-    # --------------------------------------------------------
-    # NEW:
-    # Bearish pressure is recognized earlier.
-    #
-    # We do NOT require EMA50 < EMA200.
-    #
-    # Price below EMA20 + EMA20 below EMA50
-    # is enough to establish active bearish EMA pressure.
-    # --------------------------------------------------------
-
-    bearish_ema_pressure = (
-        close < ema_20
-        and
-        ema_20 < ema_50
-    )
-
-    bearish_ema_full = (
+    bearish_ema = (
         ema_20 < ema_50
         and
         ema_50 < ema_200
@@ -1847,22 +1368,13 @@ def evaluate_scoring(
             "(20 > 50 > 200)"
         )
 
-    elif bearish_ema_full:
+    elif bearish_ema:
 
         short_score += 1
 
         short_reasons.append(
             "✅ EMA structure bearish "
             "(20 < 50 < 200)"
-        )
-
-    elif bearish_ema_pressure:
-
-        short_score += 1
-
-        short_reasons.append(
-            "✅ Bearish EMA pressure "
-            "(Price < EMA20 < EMA50)"
         )
 
     else:
@@ -1958,21 +1470,8 @@ def evaluate_scoring(
 
     elif oi_status == "Long Unwinding":
 
-        # ====================================================
-        # IMPORTANT FIX
-        #
-        # Price falling + OI falling means long positions
-        # are being closed/liquidated.
-        #
-        # This is NOT fresh short buildup, but it is genuine
-        # bearish pressure and should contribute to a SHORT
-        # setup when other bearish evidence agrees.
-        # ====================================================
-
-        short_score += 1
-
         short_reasons.append(
-            f"⚠️ OI Long Unwinding "
+            f"⚠️ Long Unwinding "
             f"({oi_change_pct:+.3f}%)"
         )
 
@@ -2030,13 +1529,9 @@ def evaluate_scoring(
     # FACTOR 5 — LIQUIDITY
     # ========================================================
 
-    liquidity = detect_liquidity(
-        df
-    )
+    liquidity = detect_liquidity(df)
 
-    liquidity_status = (
-        liquidity["status"]
-    )
+    liquidity_status = liquidity["status"]
 
     if liquidity["long"]:
 
@@ -2068,13 +1563,9 @@ def evaluate_scoring(
     # FACTOR 6 — ABSORPTION / TRAP
     # ========================================================
 
-    absorption = detect_absorption(
-        df
-    )
+    absorption = detect_absorption(df)
 
-    absorption_status = (
-        absorption["status"]
-    )
+    absorption_status = absorption["status"]
 
     if absorption["long"]:
 
@@ -2103,7 +1594,7 @@ def evaluate_scoring(
         )
 
     # ========================================================
-    # FACTOR 7 — MACD
+    # FACTOR 7 — MACD 12 / 26 / 9
     # ========================================================
 
     if (
@@ -2143,208 +1634,102 @@ def evaluate_scoring(
         )
 
     # ========================================================
-    # FACTOR 8 — PRICE ACTION + RSI
+    # FACTOR 8 — PRICE ACTION + BREAKOUT HOLD
     # ========================================================
 
-    candle_open = float(
-        latest["open"]
-    )
+    candle_open = float(latest["open"])
 
-    breakout = detect_breakout_rejection(
-        df
-    )
+    breakout = detect_breakout_rejection(df)
+    breakout_status = breakout["status"]
+    breakout_level = breakout["level"]
+    long_blocked = breakout["long_blocked"]
 
-    breakout_status = (
-        breakout["status"]
-    )
+    # New bullish-zone rejection detector. Use the latest closed
+    # candle and the same dynamic resistance used by the price-action
+    # engine. This ONLY blocks LONG; it does not add a SHORT point.
+    rejection_level = breakout_level
+    if pd.isna(rejection_level):
+        rejection_level = latest["recent_high"]
 
-    breakout_level = (
-        breakout["level"]
-    )
-
-    long_blocked = (
-        breakout["long_blocked"]
-    )
-
-    # --------------------------------------------------------
-    # Bullish-zone rejection
-    # --------------------------------------------------------
-
-    rejection_level = (
-        breakout_level
-    )
-
-    if pd.isna(
-        rejection_level
-    ):
-
-        rejection_level = (
-            latest["recent_high"]
+    rejection = RejectionResult(False, 0, [])
+    if not pd.isna(rejection_level):
+        rejection = detect_bullish_zone_rejection(
+            candle={
+                "open": latest["open"],
+                "high": latest["high"],
+                "low": latest["low"],
+                "close": latest["close"],
+            },
+            ema20=ema_20,
+            ema50=ema_50,
+            ema200=ema_200,
+            resistance=float(rejection_level),
+            volume=volume,
+            avg_volume=volume_avg,
+            close_below_level=True,
         )
-
-    rejection = RejectionResult(
-        False,
-        0,
-        []
-    )
-
-    if not pd.isna(
-        rejection_level
-    ):
-
-        rejection = (
-            detect_bullish_zone_rejection(
-                candle={
-                    "open": latest["open"],
-                    "high": latest["high"],
-                    "low": latest["low"],
-                    "close": latest["close"],
-                },
-                ema20=ema_20,
-                ema50=ema_50,
-                ema200=ema_200,
-                resistance=float(
-                    rejection_level
-                ),
-                volume=volume,
-                avg_volume=volume_avg,
-                close_below_level=True,
-            )
-        )
-
         if rejection.rejected:
-
             long_blocked = True
-
-    # ========================================================
-    # RSI STATES
-    # ========================================================
-
-    rsi_bearish = (
-        rsi_14 < RSI_BEARISH_LEVEL
-        and
-        rsi_24 < 50
-    )
-
-    rsi_strong_bearish = (
-        rsi_14 < RSI_STRONG_BEARISH_LEVEL
-        and
-        rsi_24 < RSI_BEARISH_LEVEL
-    )
-
-    rsi_bullish = (
-        rsi_14 > RSI_BULLISH_LEVEL
-        and
-        rsi_24 > 50
-    )
-
-    # --------------------------------------------------------
-    # Bullish price confirmation
-    # --------------------------------------------------------
 
     price_bullish = (
         close > candle_open
         and
         close > ema_20
-        and
-        rsi_bullish
-        and
-        breakout_status in (
-            "Bullish Breakout Confirmed",
-            "Bullish Breakout HOLD Confirmed",
-            "Bullish Breakout Retest / HOLD Confirmed"
-        )
     )
-
-    # --------------------------------------------------------
-    # Bearish price confirmation
-    #
-    # IMPORTANT FIX:
-    #
-    # Price below EMA20 + bearish RSI now participates in the
-    # price-action factor.
-    # --------------------------------------------------------
 
     price_bearish = (
         close < candle_open
         and
         close < ema_20
-        and
-        rsi_bearish
     )
 
-    # --------------------------------------------------------
-    # Breakout failure / resistance rejection
-    # --------------------------------------------------------
-
+    # Breakout failure / rejection has priority over ordinary
+    # bullish price confirmation. This is exactly the situation
+    # we want the bot to recognize at a resistance such as 2432.
     if breakout["short"]:
 
         short_score += 1
 
-        if pd.isna(
-            breakout_level
-        ):
-
-            level_text = (
-                "dynamic resistance"
-            )
-
+        if pd.isna(breakout_level):
+            level_text = "dynamic resistance"
         else:
-
-            level_text = (
-                f"${float(breakout_level):,.2f}"
-            )
+            level_text = f"${float(breakout_level):,.2f}"
 
         short_reasons.append(
-            f"⚠️ {breakout_status} "
-            f"at {level_text}"
+            f"⚠️ {breakout_status} at {level_text}"
         )
 
         long_reasons.append(
-            f"🚫 Long blocked: "
-            f"resistance not held "
+            f"🚫 Long blocked: resistance not held "
             f"({level_text})"
         )
-
-    elif price_bearish:
-
-        short_score += 1
-
-        if rsi_strong_bearish:
-
-            short_reasons.append(
-                f"✅ Bearish price + RSI "
-                f"(Price < EMA20, "
-                f"RSI14 {rsi_14:.1f}, "
-                f"RSI24 {rsi_24:.1f})"
-            )
-
-        else:
-
-            short_reasons.append(
-                f"✅ Bearish price + RSI "
-                f"(Price < EMA20, "
-                f"RSI14 {rsi_14:.1f}, "
-                f"RSI24 {rsi_24:.1f})"
-            )
 
     elif price_bullish:
 
         long_score += 1
 
         long_reasons.append(
-            "✅ Bullish price + RSI "
-            "(close > EMA20)"
+            "✅ Bullish price confirmation "
+            "(close > 20 EMA)"
+        )
+
+    elif price_bearish:
+
+        short_score += 1
+
+        short_reasons.append(
+            "✅ Bearish price confirmation "
+            "(close < 20 EMA)"
         )
 
     else:
 
         long_reasons.append(
-            "⚪ Price/RSI confirmation mixed"
+            "⚪ Price confirmation mixed"
         )
 
         short_reasons.append(
-            "⚪ Price/RSI confirmation mixed"
+            "⚪ Price confirmation mixed"
         )
 
     # ========================================================
@@ -2398,12 +1783,6 @@ def evaluate_scoring(
         "macd_hist":
             macd_hist,
 
-        "rsi_14":
-            rsi_14,
-
-        "rsi_24":
-            rsi_24,
-
         "oi_status":
             oi_status,
 
@@ -2422,6 +1801,8 @@ def evaluate_scoring(
         "breakout_level":
             breakout_level,
 
+        # Bullish-zone rejection detector output.
+        # This is a LONG invalidation signal only; it does not create a SHORT.
         "bullish_rejection":
             rejection.rejected,
 
@@ -2464,16 +1845,9 @@ def build_message(
         reasons = signal["long_reasons"]
 
         if score >= 7:
-
-            tag = (
-                "🟢 STRONG LONG WATCH"
-            )
-
+            tag = "🟢 STRONG LONG WATCH"
         else:
-
-            tag = (
-                "🟡 LONG WATCH"
-            )
+            tag = "🟡 LONG WATCH"
 
     else:
 
@@ -2481,20 +1855,11 @@ def build_message(
         reasons = signal["short_reasons"]
 
         if score >= 7:
-
-            tag = (
-                "🔴 STRONG SHORT WATCH"
-            )
-
+            tag = "🔴 STRONG SHORT WATCH"
         else:
+            tag = "🟠 SHORT WATCH"
 
-            tag = (
-                "🟠 SHORT WATCH"
-            )
-
-    if np.isnan(
-        signal["oi_change_pct"]
-    ):
+    if np.isnan(signal["oi_change_pct"]):
 
         oi_change = "N/A"
 
@@ -2530,8 +1895,7 @@ def build_message(
 
     message = (
 
-        f"{tag} "
-        f"*(Score: {score}/{MAX_SCORE})*\n"
+        f"{tag} *(Score: {score}/{MAX_SCORE})*\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -2539,8 +1903,7 @@ def build_message(
 
         f"⏱ *Interval:* `{INTERVAL}`\n"
 
-        f"🕐 *Candle Open:* "
-        f"`{candle_time}`\n"
+        f"🕐 *Candle Open:* `{candle_time}`\n"
 
         f"🔒 *Candle Close:* "
         f"`{candle_close_time}`\n"
@@ -2592,34 +1955,23 @@ def build_message(
         f"📊 *MACD Histogram:* "
         f"`{signal['macd_hist']:.4f}`\n"
 
-        f"📊 *RSI 14:* "
-        f"`{signal['rsi_14']:.2f}`\n"
-
-        f"📊 *RSI 24:* "
-        f"`{signal['rsi_24']:.2f}`\n"
-
         f"💧 *Liquidity:* "
         f"`{signal['liquidity_status']}`\n"
 
         f"🧲 *Absorption:* "
         f"`{signal['absorption_status']}`\n"
-
         f"🚧 *Breakout / Hold:* "
         f"`{signal['breakout_status']}`\n"
-
         f"🔴 *Bullish Rejection:* "
         f"`{signal['bullish_rejection']} "
-        f"(score "
-        f"{signal['bullish_rejection_score']})`\n"
+        f"(score {signal['bullish_rejection_score']})`\n"
 
         f"━━━━━━━━━━━━━━━━━━━━\n"
 
         f"📋 *Phase 2 Confluences:*\n"
 
         +
-        "\n".join(
-            reasons
-        )
+        "\n".join(reasons)
 
         +
         "\n"
@@ -2651,19 +2003,11 @@ def run_engine():
     print(
         "📊 8-Factor Engine:"
         " EMA + Volume + OI + Delta/CVD +"
-        " Liquidity + Absorption + MACD +"
-        " Price Action/RSI"
+        " Liquidity + Absorption + MACD + Price Action"
     )
-
     print(
         "🟡 Pre-breakout live watch enabled: "
-        f"within {PRE_BREAKOUT_DISTANCE_PCT:.2f}% "
-        f"of resistance"
-    )
-
-    print(
-        "🔴 Bearish SHORT detection enhanced:"
-        " EMA pressure + OI unwinding + RSI"
+        f"within {PRE_BREAKOUT_DISTANCE_PCT:.2f}% of resistance"
     )
 
     last_processed_time = None
@@ -2671,172 +2015,103 @@ def run_engine():
     last_alert_direction = None
     last_alert_score = None
 
+    # Pre-breakout watch state. Separate from confirmed signals.
     last_pre_breakout_key = None
     last_pre_breakout_sent_at = None
 
+    # Breakout -> retest state. This is intentionally separate from
+    # the 8-factor scoring system and never creates an auto-trade.
+    pending_retest_level = None
+    pending_retest_candle_time = None
+    pending_retest_candle_count = 0
+    last_retest_alert_key = None
+
+    # Market scanner state. Scanner is discovery-only for now; it does
+    # not replace the ETH scoring engine or auto-trade selected coins.
     last_market_scan_at = None
 
     while True:
 
         try:
 
-            # =================================================
+            # ------------------------------------------------
             # FETCH CANDLES
-            # =================================================
+            # ------------------------------------------------
 
             df = fetch_klines()
 
-            # =================================================
-            # MARKET SCANNER
-            # =================================================
-
+            # ------------------------------------------------
+            # BINANCE FUTURES MARKET SCANNER
+            # ------------------------------------------------
             if MARKET_SCANNER_ENABLED:
-
                 now = utc_now()
-
                 scanner_due = (
                     last_market_scan_at is None
-                    or
-                    (
-                        now
-                        -
-                        last_market_scan_at
-                    ).total_seconds()
-                    >=
-                    MARKET_SCANNER_INTERVAL_SECONDS
+                    or (now - last_market_scan_at).total_seconds() >= MARKET_SCANNER_INTERVAL_SECONDS
                 )
-
                 if scanner_due:
-
                     try:
-
-                        candidates = (
-                            scan_market()
-                        )
-
-                        print(
-                            format_scanner_log(
-                                candidates
-                            )
-                        )
-
-                        last_market_scan_at = (
-                            now
-                        )
-
+                        candidates = scan_market()
+                        print(format_scanner_log(candidates))
+                        last_market_scan_at = now
                     except Exception as scanner_error:
+                        print(f"⚠️ Futures scanner error: {scanner_error}")
+                        last_market_scan_at = now
 
-                        print(
-                            "⚠️ Futures scanner error: "
-                            f"{scanner_error}"
-                        )
-
-                        last_market_scan_at = (
-                            now
-                        )
-
-            # =================================================
+            # ------------------------------------------------
             # LIVE PRE-BREAKOUT WATCH
-            # =================================================
-
+            # ------------------------------------------------
+            # Runs on the CURRENT forming candle. It does not replace
+            # the confirmed closed-candle engine below.
             try:
-
-                live_df = (
-                    calculate_indicators(
-                        df
-                    )
-                )
-
-                pre_breakout = (
-                    detect_pre_breakout_watch(
-                        live_df
-                    )
-                )
+                live_df = calculate_indicators(df)
+                pre_breakout = detect_pre_breakout_watch(live_df)
 
                 if pre_breakout["active"]:
-
-                    current_live_candle = (
-                        live_df
-                        .iloc[-1]["open_time"]
-                    )
-
+                    current_live_candle = live_df.iloc[-1]["open_time"]
                     watch_key = (
                         current_live_candle,
-                        round(
-                            float(
-                                pre_breakout["level"]
-                            ),
-                            4
-                        )
+                        round(float(pre_breakout["level"]), 4)
                     )
-
                     now = utc_now()
 
                     cooldown_ok = (
-                        last_pre_breakout_sent_at
-                        is None
+                        last_pre_breakout_sent_at is None
                         or
-                        (
-                            now
-                            -
-                            last_pre_breakout_sent_at
-                        ).total_seconds()
-                        >=
-                        PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
+                        (now - last_pre_breakout_sent_at).total_seconds()
+                        >= PRE_BREAKOUT_ALERT_COOLDOWN_SECONDS
                     )
 
                     if (
-                        watch_key
-                        !=
-                        last_pre_breakout_key
+                        watch_key != last_pre_breakout_key
                         and
                         cooldown_ok
                     ):
-
-                        watch_message = (
-                            build_pre_breakout_message(
-                                pre_breakout,
-                                now
-                            )
+                        watch_message = build_pre_breakout_message(
+                            pre_breakout,
+                            now
                         )
 
-                        if send_telegram_alert(
-                            watch_message
-                        ):
-
-                            last_pre_breakout_key = (
-                                watch_key
-                            )
-
-                            last_pre_breakout_sent_at = (
-                                now
-                            )
-
+                        if send_telegram_alert(watch_message):
+                            last_pre_breakout_key = watch_key
+                            last_pre_breakout_sent_at = now
                             print(
-                                "🟡 PRE-BREAKOUT WATCH "
-                                "alert sent. "
-                                f"Resistance: "
-                                f"${pre_breakout['level']:,.2f}"
+                                "🟡 PRE-BREAKOUT WATCH alert sent. "
+                                f"Resistance: ${pre_breakout['level']:,.2f}"
                             )
 
             except Exception as pre_error:
-
                 print(
-                    "⚠️ Pre-breakout watch error: "
-                    f"{pre_error}"
+                    f"⚠️ Pre-breakout watch error: {pre_error}"
                 )
-
-            # =================================================
-            # CLOSED CANDLE
-            # =================================================
 
             latest_closed_time = (
                 df.iloc[-2]["open_time"]
             )
 
-            # =================================================
+            # ------------------------------------------------
             # PROCESS ONLY ONCE PER CLOSED CANDLE
-            # =================================================
+            # ------------------------------------------------
 
             if (
                 latest_closed_time
@@ -2844,56 +2119,133 @@ def run_engine():
                 last_processed_time
             ):
 
-                detection_at = (
-                    utc_now()
-                )
+                detection_at = utc_now()
 
                 last_processed_time = (
                     latest_closed_time
                 )
 
-                # =================================================
+                # ------------------------------------------------
                 # INDICATORS
-                # =================================================
+                # ------------------------------------------------
 
-                df = calculate_indicators(
-                    df
-                )
+                df = calculate_indicators(df)
 
-                # =================================================
+                # ------------------------------------------------
                 # OI
-                # =================================================
+                # ------------------------------------------------
 
-                df_oi = (
-                    fetch_open_interest()
+                df_oi = fetch_open_interest()
+
+                # ------------------------------------------------
+                # PHASE 2 SCORING
+                # ------------------------------------------------
+
+                signal = evaluate_scoring(
+                    df,
+                    df_oi
                 )
 
-                # =================================================
-                # SCORING
-                # =================================================
+                signal_generated_at = utc_now()
 
-                signal = (
-                    evaluate_scoring(
-                        df,
-                        df_oi
+                # ------------------------------------------------
+                # BREAKOUT -> RETEST CONFIRMATION
+                # ------------------------------------------------
+                # This runs once per CLOSED 5M candle. A breakout level
+                # is remembered and tested on later candles.
+                retest = detect_bullish_breakout_retest(
+                    df,
+                    pending_retest_level=pending_retest_level,
+                    pending_retest_candle_time=pending_retest_candle_time,
+                )
+
+                if retest["breakout"]:
+                    pending_retest_level = retest["level"]
+                    pending_retest_candle_time = retest["candle_time"]
+                    pending_retest_candle_count = 0
+
+                    print(
+                        "\n🟢 BULLISH BREAKOUT CONFIRMED\n"
+                        f"Breakout Level: ${pending_retest_level:,.2f}\n"
+                        "⏳ Waiting for RETEST..."
                     )
-                )
 
-                signal_generated_at = (
-                    utc_now()
-                )
+                elif pending_retest_level is not None:
+                    pending_retest_candle_count += 1
 
-                long_score = (
-                    signal["long_score"]
-                )
+                    print(
+                        f"🔄 RETEST WATCH | Level: "
+                        f"${pending_retest_level:,.2f} | "
+                        f"Candle: {pending_retest_candle_count}/"
+                        f"{RETEST_MAX_CANDLES} | "
+                        f"Status: {retest['status']}"
+                    )
 
-                short_score = (
-                    signal["short_score"]
-                )
+                    if retest["retest_confirmed"]:
+                        retest_key = (
+                            pending_retest_candle_time,
+                            round(float(pending_retest_level), 4),
+                            retest["candle_time"],
+                            "CONFIRMED",
+                        )
 
-                # =================================================
+                        if retest_key != last_retest_alert_key:
+                            retest_message = build_retest_message(
+                                retest,
+                                signal_generated_at,
+                            )
+
+                            if retest_message and send_telegram_alert(retest_message):
+                                last_retest_alert_key = retest_key
+                                print(
+                                    "🟢 RETEST CONFIRMED alert sent. "
+                                    f"Level: ${pending_retest_level:,.2f}"
+                                )
+
+                        pending_retest_level = None
+                        pending_retest_candle_time = None
+                        pending_retest_candle_count = 0
+
+                    elif retest["retest_failed"]:
+                        retest_key = (
+                            pending_retest_candle_time,
+                            round(float(pending_retest_level), 4),
+                            retest["candle_time"],
+                            "FAILED",
+                        )
+
+                        if retest_key != last_retest_alert_key:
+                            retest_message = build_retest_message(
+                                retest,
+                                signal_generated_at,
+                            )
+
+                            if retest_message and send_telegram_alert(retest_message):
+                                last_retest_alert_key = retest_key
+                                print(
+                                    "🔴 RETEST FAILED alert sent. "
+                                    f"Level: ${pending_retest_level:,.2f}"
+                                )
+
+                        pending_retest_level = None
+                        pending_retest_candle_time = None
+                        pending_retest_candle_count = 0
+
+                    elif pending_retest_candle_count >= RETEST_MAX_CANDLES:
+                        print(
+                            "⚪ RETEST WINDOW EXPIRED | Level: "
+                            f"${pending_retest_level:,.2f}"
+                        )
+                        pending_retest_level = None
+                        pending_retest_candle_time = None
+                        pending_retest_candle_count = 0
+
+                long_score = signal["long_score"]
+                short_score = signal["short_score"]
+
+                # ------------------------------------------------
                 # TIMING
-                # =================================================
+                # ------------------------------------------------
 
                 detection_delay = (
                     detection_at
@@ -2944,9 +2296,9 @@ def run_engine():
                     "===================================="
                 )
 
-                # =================================================
+                # ------------------------------------------------
                 # OI LOG
-                # =================================================
+                # ------------------------------------------------
 
                 if np.isnan(
                     signal["oi_change_pct"]
@@ -2960,9 +2312,9 @@ def run_engine():
                         f"{signal['oi_change_pct']:+.3f}%"
                     )
 
-                # =================================================
+                # ------------------------------------------------
                 # NORMAL LOG
-                # =================================================
+                # ------------------------------------------------
 
                 print(
                     "\n"
@@ -3000,12 +2352,6 @@ def run_engine():
                     f"MACD Signal: "
                     f"{signal['macd_signal']:.4f}\n"
 
-                    f"RSI14: "
-                    f"{signal['rsi_14']:.2f}\n"
-
-                    f"RSI24: "
-                    f"{signal['rsi_24']:.2f}\n"
-
                     f"Liquidity: "
                     f"{signal['liquidity_status']}\n"
 
@@ -3020,8 +2366,7 @@ def run_engine():
 
                     f"Bullish Rejection: "
                     f"{signal['bullish_rejection']} "
-                    f"(score "
-                    f"{signal['bullish_rejection_score']})\n"
+                    f"(score {signal['bullish_rejection_score']})\n"
 
                     f"Long Score: "
                     f"{long_score}/{MAX_SCORE}\n"
@@ -3030,9 +2375,9 @@ def run_engine():
                     f"{short_score}/{MAX_SCORE}"
                 )
 
-                # =================================================
+                # ------------------------------------------------
                 # LONG
-                # =================================================
+                # ------------------------------------------------
 
                 if (
                     long_score >= MIN_SCORE
@@ -3065,13 +2410,9 @@ def run_engine():
                             signal_generated_at
                         )
 
-                        if send_telegram_alert(
-                            message
-                        ):
+                        if send_telegram_alert(message):
 
-                            telegram_sent_at = (
-                                utc_now()
-                            )
+                            telegram_sent_at = utc_now()
 
                             telegram_delay = (
                                 telegram_sent_at
@@ -3079,13 +2420,8 @@ def run_engine():
                                 signal_generated_at
                             ).total_seconds()
 
-                            last_alert_direction = (
-                                "LONG"
-                            )
-
-                            last_alert_score = (
-                                long_score
-                            )
+                            last_alert_direction = "LONG"
+                            last_alert_score = long_score
 
                             print(
                                 "🟢 PHASE 2 LONG alert sent."
@@ -3096,9 +2432,9 @@ def run_engine():
                                 f"{telegram_delay:.2f} sec"
                             )
 
-                # =================================================
+                # ------------------------------------------------
                 # SHORT
-                # =================================================
+                # ------------------------------------------------
 
                 elif (
                     short_score >= MIN_SCORE
@@ -3129,13 +2465,9 @@ def run_engine():
                             signal_generated_at
                         )
 
-                        if send_telegram_alert(
-                            message
-                        ):
+                        if send_telegram_alert(message):
 
-                            telegram_sent_at = (
-                                utc_now()
-                            )
+                            telegram_sent_at = utc_now()
 
                             telegram_delay = (
                                 telegram_sent_at
@@ -3143,13 +2475,8 @@ def run_engine():
                                 signal_generated_at
                             ).total_seconds()
 
-                            last_alert_direction = (
-                                "SHORT"
-                            )
-
-                            last_alert_score = (
-                                short_score
-                            )
+                            last_alert_direction = "SHORT"
+                            last_alert_score = short_score
 
                             print(
                                 "🔴 PHASE 2 SHORT alert sent."
@@ -3160,53 +2487,36 @@ def run_engine():
                                 f"{telegram_delay:.2f} sec"
                             )
 
-                # =================================================
+                # ------------------------------------------------
                 # NO HIGH CONFLUENCE
-                # =================================================
+                # ------------------------------------------------
 
                 else:
 
-                    if signal[
-                        "bullish_rejection"
-                    ]:
-
+                    if signal["bullish_rejection"]:
                         print(
-                            "🔴 BULLISH ZONE REJECTION: "
-                            "LONG INVALIDATED. "
-                            f"Score: "
-                            f"{signal['bullish_rejection_score']}/7 | "
-                            f"Reasons: "
-                            f"{', '.join(signal['bullish_rejection_reasons'])}"
+                            "🔴 BULLISH ZONE REJECTION: LONG INVALIDATED. "
+                            f"Score: {signal['bullish_rejection_score']}/7 | "
+                            f"Reasons: {', '.join(signal['bullish_rejection_reasons'])}"
                         )
-
-                    elif signal[
-                        "long_blocked"
-                    ]:
-
+                    elif signal["long_blocked"]:
                         print(
-                            "🚫 LONG BLOCKED: "
-                            "breakout resistance was not held. "
-                            f"Reason: "
-                            f"{signal['breakout_status']}"
+                            "🚫 LONG BLOCKED: breakout resistance was not held. "
+                            f"Reason: {signal['breakout_status']}"
                         )
-
                     else:
-
                         print(
-                            "⚪ No Phase 2 "
-                            "high-confluence setup."
+                            "⚪ No Phase 2 high-confluence setup."
                         )
 
                     last_alert_direction = None
                     last_alert_score = None
 
-            # =================================================
+            # ------------------------------------------------
             # POLL
-            # =================================================
+            # ------------------------------------------------
 
-            time.sleep(
-                POLL_SECONDS
-            )
+            time.sleep(POLL_SECONDS)
 
         except Exception as e:
 
